@@ -1,0 +1,42 @@
+name: Build Windows release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          architecture: 'x64'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-build.txt
+      - name: Prepare project environment
+        shell: pwsh
+        run: ./scripts/setup_env.ps1
+      - name: Build and verify portable application
+        shell: pwsh
+        run: ./scripts/build_release.ps1
+      - uses: actions/upload-artifact@v7
+        with:
+          name: SJTUFitMan-windows-x64
+          path: |
+            dist/*.zip
+            dist/*.zip.sha256
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30

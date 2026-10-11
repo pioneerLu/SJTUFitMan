@@ -9,6 +9,7 @@ import time
 from urllib.parse import urlsplit
 
 from session import ROOT, ORIGIN, HOST, authenticated_response, load_config, session_path, storage_values
+from runtime import asset_path
 
 DEFAULT_URL = ORIGIN + '/pc/#/apointmentDetails/1/d784ad7c-cb24-4282-afd6-a67aec68c675/%25E5%2585%25A8%25E9%2583%25A8/0'
 LOGIN_HOST = 'jaccount.sjtu.edu.cn'
@@ -304,7 +305,7 @@ class LoginBrowser:
         })
 
     def inspect(self):
-        snapshot_js = (Path(__file__).parent / 'appointment_snapshot.js').read_text(encoding='utf-8')
+        snapshot_js = asset_path('scripts/appointment_snapshot.js').read_text(encoding='utf-8')
         self.page.wait_for_selector('#apointmentDetails', timeout=20000)
         deadline = time.monotonic() + 25
         data = None

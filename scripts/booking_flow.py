@@ -14,8 +14,9 @@ from urllib.parse import urlsplit
 
 from login_flow import FlowError, LoginBrowser, atomic_json, user_fingerprint
 from session import HOST, ORIGIN, ROOT
+from runtime import asset_path
 
-SCRIPTS = Path(__file__).parent
+SCRIPTS = asset_path('scripts')
 SNAPSHOT = (SCRIPTS / 'appointment_snapshot.js').read_text(encoding='utf-8')
 CHECKOUT = (SCRIPTS / 'checkout_snapshot.js').read_text(encoding='utf-8')
 CONFIRM = '/venue/personal/ConfirmOrder'

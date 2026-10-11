@@ -14,7 +14,15 @@
 
 支持 **1 小时或连续 2 小时**。两小时要求同一场地的两个小时都有余量，合为一张订单。登录验证码使用本地 ddddocr，预约滑块使用本地 OpenCV；失败时转手动处理。
 
-## 安装与启动
+## 普通用户：下载发布版
+
+没有VS Code或Python也可以使用。下载发布附件 **`SJTUFitMan-v版本号-windows-x64.zip`**，将整个文件夹解压到桌面或“下载”目录，双击 **`交大健身房助手.exe`**。电脑仍需安装Chrome；账号、邮件、日期和时段均通过界面设置。
+
+发布版自带Python运行环境、ddddocr模型、OpenCV和Playwright驱动。首次启动在应用目录创建自己的 `config/config.toml`，运行记录保存在 `.local/`。个人配置写在程序目录外层，不写入exe；请保留完整解压目录。
+
+本地生成的发布包位于 `dist/`。仓库没有发布附件时，由维护者按[打包说明](docs/RELEASE_GUIDE.md)生成；GitHub 的 **Source code** 压缩包是开发者源码，不是普通用户的可执行发布版。
+
+## 开发者：源码安装与启动
 
 当前支持 **Windows、Python 3.13（64 位）和 Google Chrome**。使用项目独立 `.venv`，依赖版本固定在 `requirements.txt`。
 
@@ -99,6 +107,8 @@ scripts/
   mail_notice.py             # 付款提醒和邮件去重
   setup_env.ps1              # 安装独立环境
   check_release.py           # 发布文件与个人信息检查
+  build_release.py           # 打包、发布版自检、生成ZIP和校验文件
+packaging/                  # Windows打包定义
 docs/                       # 操作说明与历史验证报告
 tests/                      # 本地模拟测试
 .local/                     # 会话、验证码图片、订单、邮件等私有运行记录

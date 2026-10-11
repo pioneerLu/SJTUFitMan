@@ -7,10 +7,10 @@ import re
 import tempfile
 import tomllib
 
-from runtime import ROOT
+from runtime import ROOT, asset_path
 
 CONFIG_PATH=ROOT/'config/config.toml'
-EXAMPLE_PATH=ROOT/'config/config.example.toml'
+EXAMPLE_PATH=asset_path('config/config.example.toml')
 
 
 class ConfigError(ValueError):
@@ -74,7 +74,8 @@ def ensure_config(root=ROOT):
     if target.exists():
         _read(target)
         return target
-    data=_read(root/'config/config.example.toml')
+    template=root/'config/config.example.toml'
+    data=_read(template if template.is_file() else EXAMPLE_PATH)
     write_config(data,target)
     return target
 

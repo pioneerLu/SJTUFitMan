@@ -11,6 +11,6 @@ except RuntimeError:
     window=tk.Tk();window.withdraw()
     messagebox.showerror('首次安装','请先按照README.md安装依赖：运行scripts/setup_env.ps1。',parent=window)
     window.destroy();raise SystemExit(2)
-from app_ui import main
+from desktop_entry import main
 
-main()
+raise SystemExit(main())

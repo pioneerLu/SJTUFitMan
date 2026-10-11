@@ -8,12 +8,11 @@ import sys
 import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
-from runtime import python_path
+from runtime import ROOT, worker_command
 from booking_options import GYM_TIME_SLOTS, date_label, date_value, local_dates, period_choices
 from poll_settings import beijing_now
 from configuration import CONFIG_PATH
 
-ROOT = Path(__file__).resolve().parents[1]
 
 
 class BookingApp:
@@ -168,12 +167,11 @@ class BookingApp:
         if mode in ('prepare', 'options', 'inspect'):
             self.prepared = None
         def worker():
-            python = python_path()
-            command = [str(python), str(ROOT / 'scripts/booking.py'), '--config', str(CONFIG_PATH), mode, *extra]
-            settings = dict(cwd=ROOT, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600)
+            settings = dict(cwd=ROOT, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600)
             if os.name == 'nt':
                 settings['creationflags'] = subprocess.CREATE_NO_WINDOW
             try:
+                command = worker_command('booking','--config',CONFIG_PATH,mode,*extra)
                 result = subprocess.run(command, **settings)
                 start = result.stdout.find('{')
                 data = json.JSONDecoder().raw_decode(result.stdout[start:])[0] if start >= 0 else None

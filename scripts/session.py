@@ -9,6 +9,7 @@ import ssl
 import sys
 import tomllib
 from configuration import CONFIG_PATH, read_config
+from runtime import ROOT
 from urllib.error import HTTPError, URLError
 from urllib.request import (
     HTTPRedirectHandler,
@@ -19,7 +20,6 @@ from urllib.request import (
 )
 
 
-ROOT = Path(__file__).resolve().parents[1]
 ORIGIN = "https://sports.sjtu.edu.cn"
 HOST = "sports.sjtu.edu.cn"
 CURRENT_USER_URL = ORIGIN + "/system/user/currentUser"

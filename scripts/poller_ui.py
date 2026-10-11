@@ -16,7 +16,7 @@ from poll_runner import STATUS, STOP
 from poll_settings import SETTINGS_PATH, PollSettings, WaitlistSettings, beijing_now, load_settings, load_mail_settings, load_waitlist_settings
 from booking_options import GYM_TIME_SLOTS, date_label, date_value, local_dates, period_choices
 from selection_widgets import TimeSlotPicker
-from runtime import python_path
+from runtime import worker_command
 from session import ROOT
 from configuration import read_config, write_config, ConfigError
 
@@ -263,14 +263,14 @@ class PollerApp:
     def launch(self,command):
         if self.busy or self.closed or not self.activity_guard(): return
         self.set_busy(True)
-        settings={'cwd':ROOT,'stdout':subprocess.PIPE,'stderr':subprocess.PIPE,'text':True,'encoding':'utf-8','errors':'replace'}
+        settings={'cwd':ROOT,'stdin':subprocess.DEVNULL,'stdout':subprocess.PIPE,'stderr':subprocess.PIPE,'text':True,'encoding':'utf-8','errors':'replace'}
         if os.name=='nt': settings['creationflags']=subprocess.CREATE_NO_WINDOW
         try:
-            arguments=[str(python_path()),str(ROOT/'scripts/booking.py' if command=='options' else ROOT/'scripts/poller.py'),command]
+            arguments=worker_command('booking' if command=='options' else 'poller',command)
             if command=='options': arguments+=['--activity','健身房','--date',date_value(self.waitlist_vars['date'].get())]
             self.process=subprocess.Popen(arguments,**settings)
         except Exception:
-            self.set_busy(False);self.status.set('程序未能启动，请检查本项目虚拟环境。');return
+            self.set_busy(False);self.status.set('程序未能启动，请检查程序文件或项目独立环境。');return
         process=self.process
         self.running_command=command
         def collect():

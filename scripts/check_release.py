@@ -17,6 +17,7 @@ PRIVATE_PROBES = (
 PUBLIC_ROOT_FILES = (
     '.gitignore', '.gitattributes', 'README.md', '交大健身房助手.pyw',
     'requirements.txt', 'requirements-login.txt', 'requirements-booking.txt',
+    'requirements-build.txt',
 )
 
 
@@ -56,7 +57,7 @@ def inventory(root):
         names = sorted(set(listed.stdout.decode('utf-8').rstrip('\0').split('\0')) - {''})
         return names, True
     names = [name for name in (*PUBLIC_ROOT_FILES, EXAMPLE) if (root/name).is_file()]
-    for directory in ('scripts', 'tests', 'docs', '.github'):
+    for directory in ('scripts', 'tests', 'docs', '.github', 'packaging'):
         for path in (root/directory).rglob('*'):
             name = path.relative_to(root).as_posix()
             if path.is_file() and not private_path(name):
