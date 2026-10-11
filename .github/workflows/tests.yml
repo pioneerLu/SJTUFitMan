@@ -1,0 +1,40 @@
+name: Local tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: pip
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install isolated environment
+        shell: pwsh
+        run: ./scripts/setup_env.ps1
+      - name: Python tests
+        shell: pwsh
+        run: ./.venv/Scripts/python.exe -m unittest discover -s tests -p 'test_*.py'
+      - name: Desktop layout
+        shell: pwsh
+        run: ./.venv/Scripts/python.exe scripts/check_ui.py
+      - name: JavaScript snapshots
+        shell: pwsh
+        run: node --test tests/appointment_snapshot.test.cjs tests/checkout_snapshot.test.cjs tests/export_session.test.cjs tests/two_hour_frontend.test.cjs
+      - name: Release privacy check
+        shell: pwsh
+        run: ./.venv/Scripts/python.exe scripts/check_release.py

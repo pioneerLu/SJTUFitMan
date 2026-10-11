@@ -1,0 +1,54 @@
+# 首次启动自动复制为config/config.toml。只在本地填写；不要上传个人配置。
+# 登录、预约、轮询和邮件统一使用这一份文件。
+[site]
+appointment_url = "https://sports.sjtu.edu.cn/pc/#/apointmentDetails/1/d784ad7c-cb24-4282-afd6-a67aec68c675/%25E5%2585%25A8%25E9%2583%25A8/0"
+timezone = "Asia/Shanghai"
+
+[auth]
+# 留空可手动登录。需要OCR自动登录时填写自己的jAccount。
+username = ""
+password = ""
+cookies_file = ".local/auth/cookies.json"
+storage_state_file = ".local/auth/storage-state.json"
+session_storage_file = ".local/auth/session-storage.json"
+
+[polling]
+# 每日开抢：北京时间12:00预约7天后。保存启用设置后仍须点击启动。
+enabled = false
+interval_seconds = 60
+window_minutes = 15
+max_checks = 15
+manual_timeout_seconds = 300
+
+[booking]
+# 从每日开抢页添加候选。单个候选18:00-20:00表示连续2小时。
+# 两个候选18:00-19:00和19:00-20:00表示备选，不表示同时预约。
+time_slots = []
+field = ""
+
+[waitlist]
+# 从候补页选择固定日期/时段，不要求polling.enabled。
+date = ""
+time = ""
+field = ""
+# now立即开始；scheduled按照北京时间start_at开始。
+start_mode = "now"
+start_at = ""
+interval_seconds = 60
+manual_timeout_seconds = 300
+
+[mail]
+# QQ邮箱通常使用smtp.qq.com、465和ssl。用户名/发件人填写自己的邮箱。
+smtp_host = "smtp.qq.com"
+port = 465
+security = "ssl"
+username = ""
+# 填邮箱服务商提供的SMTP授权码，不是邮箱登录密码。
+password = ""
+# password留空时，也可从这个环境变量读取授权码。
+password_env = "SJTU_SMTP_PASSWORD"
+sender = ""
+recipient = ""
+timeout_seconds = 15
+retry_interval_seconds = 60
+max_attempts = 3

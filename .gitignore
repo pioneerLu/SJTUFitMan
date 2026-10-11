@@ -1,0 +1,24 @@
+# Local credentials and browser sessions
+/config.toml
+/reservation.toml
+/reservation.tmp
+# Only the blank example belongs in Git. Private copies/temporary writes do not.
+/config/*
+!/config/config.example.toml
+/.local/
+/.env
+/.env.*
+
+# Python runtime artifacts
+__pycache__/
+*.py[cod]
+/.venv/
+/.inspection/
+/.pytest_cache/
+/.ruff_cache/
+/.idea/
+/.vscode/
+/*.log
+/dist/
+/build/
+*.egg-info/

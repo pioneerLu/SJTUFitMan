@@ -1,0 +1,44 @@
+交大健身房 · 本地登录助手（统一配置版）
+
+打开方式
+  双击项目根目录唯一入口“交大健身房助手.pyw”，选择“登录与会话”。
+  助手、预约程序均使用本项目 .venv，不加载旧 .local/deps 或系统第三方包。
+  新机器先安装 Python 3.13、Chrome，运行：pwsh -File scripts/setup_env.ps1
+  当前机器的独立环境已经安装并通过依赖检查。
+
+OCR自动登录
+  在 config/config.toml 的 [auth] 中本地填写账号密码，或在窗口填写后点击保存。
+  点击“打开登录页”，再点击“OCR自动登录”。
+  ddddocr 1.6.1 在本机CPU识别图片，原网页负责提交账号密码和验证码。
+  自动最多尝试2次，且仅在网站明确提示验证码错误时重试。
+  同一助手运行最多提交3次，每次自动尝试至少间隔20秒。
+  账号密码错误、锁定、未知响应、额外认证、识别异常时立即转手动。
+  没有Vision按钮、模型API、商业识别服务或LLM调用。
+
+手动处理
+  浏览器保持打开，可直接输入验证码并登录。
+  也可以点击“只识别当前图片”，核对/修改结果，再点击“使用此验证码登录”。
+  自动流程停止后不会继续尝试；需要手动登录或用户重新启动。
+  成功后自动确认体育平台会话，保存Cookie和页面状态，用新会话验证恢复。
+  预约优先复用保存的会话，无须每次登录。
+
+本地数据
+  窗口输入的密码不会自动写盘；点击“保存账号到本地配置”才写入config/config.toml。
+  .local/auth/ 只保存 sports.sjtu.edu.cn 会话，不导出jAccount单点登录Cookie。
+  .local/auth/session-meta.json 的 restored_and_verified=true 表示恢复验证成功。
+  .local/captcha/last-login.json 保存结果和计数，不保存账号、密码或验证码答案。
+  .local/captcha/login-benchmark.json 保存正式实测明细。
+  config/config.toml、.local/、.venv/ 均已排除版本跟踪。
+  本地20秒间隔是程序限制，不是学校公布或保证的安全频率。
+
+本次实测
+  2026-10-10，在5个独立登录会话中提交7次验证码。
+  首次登录通过3/5（60%）；验证码提交通过5/7（71.4%）。
+  最多两次尝试后登录成功5/5，5次均完成新会话恢复验证。
+  小样本结果不能视为长期通过率承诺；详情见 CAPTCHA_REPORT.txt。
+
+命令入口
+  .venv\Scripts\python.exe scripts/login.py
+  .venv\Scripts\python.exe scripts/login.py --inspect-only
+  .venv\Scripts\python.exe scripts/benchmark_captcha.py login --samples 5 --interval 20
+  登录测试真实提交账号密码，最多5个会话，异常时停止；不要高频反复运行。

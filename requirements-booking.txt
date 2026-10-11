@@ -1,0 +1,2 @@
+# Verified runtime; no model SDK or OCR dependency is needed for booking.
+-r requirements.txt
