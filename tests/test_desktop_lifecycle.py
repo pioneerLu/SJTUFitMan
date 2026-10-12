@@ -44,22 +44,27 @@ class ScrollWheelTests(unittest.TestCase):
     def wheel_over(self, widget):
         # Keep ordinary hit testing independent of other foreground Windows apps.
         native = self.root.tk
-        def call(*args):
-            if args[:2] == ('winfo', 'containing'): return str(widget)
-            return native.call(*args)
-        with patch.object(self.frame, 'tk', SimpleNamespace(call=call)):
+        class HitTestDispatcher:
+            def call(self, *args):
+                if args[:2] == ('winfo', 'containing'): return str(widget)
+                return native.call(*args)
+            def __getattr__(self, name):
+                return getattr(native, name)
+        dispatcher = HitTestDispatcher()
+        with patch.object(self.frame, 'tk', dispatcher), patch.object(self.frame.canvas, 'tk', dispatcher):
             self.frame.wheel(self.event_over(str(widget)))
 
     def test_tcl_only_combobox_popdown_does_not_raise_or_scroll_page(self):
         self.root.tk.call('ttk::combobox::Post', str(self.combo))
         self.root.update()
         popup = str(self.root.tk.call('ttk::combobox::PopdownWindow', str(self.combo))) + '.f.l'
-        event = self.event_over(popup)
-        # Reproduce the exact old failure on a real Tcl-created dropdown.
+        self.assertEqual(self.root.tk.call('winfo', 'class', popup), 'Listbox')
+        # The real Tcl dropdown is absent from Tkinter's children mapping.
+        # Check that mapping directly: a CI runner may have another window on top.
         with self.assertRaises(KeyError):
-            self.frame.canvas.winfo_containing(event.x_root, event.y_root)
+            self.frame.canvas.nametowidget(popup)
         before = self.frame.canvas.yview()
-        self.frame.wheel(event)
+        self.wheel_over(popup)
         self.assertEqual(self.frame.canvas.yview(), before)
         self.root.tk.call('ttk::combobox::Unpost', str(self.combo))
 
