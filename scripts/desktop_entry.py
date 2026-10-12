@@ -34,7 +34,8 @@ def main(argv=None):
                     'locations':[{'file':Path(frame.filename).name,'line':frame.lineno,'function':frame.name}
                                  for frame in traceback.extract_tb(error.__traceback__)[-5:]]}),file=sys.stderr)
             from login_flow import FlowError
-            if isinstance(error,FlowError):
+            from browser_runtime import BrowserError
+            if isinstance(error,(FlowError,BrowserError)):
                 print(str(error),file=sys.stderr);return 2
             print('操作未完成，请检查本地配置、网络和程序文件。',file=sys.stderr);return 3
     if argv[:1]==['--smoke-ui']:

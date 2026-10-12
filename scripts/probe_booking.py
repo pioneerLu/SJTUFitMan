@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from playwright.sync_api import sync_playwright
+from playwright_runtime import sync_playwright
 from login_flow import LoginBrowser, atomic_json
 from session import ROOT, load_config
 from configuration import CONFIG_PATH
@@ -26,7 +26,7 @@ def main():
     events = []
     with sync_playwright() as pw:
         try:
-            flow.browser = pw.chromium.launch(channel='chrome', headless=True)
+            flow.launch(pw, headless=True)
             flow.context = flow.new_context(restore=True)
             flow.current_user()
             page = flow.page = flow.context.new_page()

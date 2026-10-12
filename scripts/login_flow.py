@@ -10,9 +10,20 @@ from urllib.parse import urlsplit
 
 from session import ROOT, ORIGIN, HOST, authenticated_response, load_config, session_path, storage_values
 from runtime import asset_path
+from captcha_image import NATIVE_IMAGE_JS, decode_native_image
+from browser_runtime import launch_browser
 
 DEFAULT_URL = ORIGIN + '/pc/#/apointmentDetails/1/d784ad7c-cb24-4282-afd6-a67aec68c675/%25E5%2585%25A8%25E9%2583%25A8/0'
 LOGIN_HOST = 'jaccount.sjtu.edu.cn'
+LOGIN_FORM_READY = """(host) => {
+    if (location.protocol !== 'https:' || location.hostname !== host) return false;
+    return ['input-login-user', 'input-login-pass'].every(id => {
+        const field = document.getElementById(id);
+        if (!field || field.disabled || field.readOnly) return false;
+        const box = field.getBoundingClientRect();
+        return box.width > 0 && box.height > 0 && getComputedStyle(field).visibility !== 'hidden';
+    });
+}"""
 
 
 class FlowError(Exception):
@@ -73,20 +84,29 @@ class LoginBrowser:
         self.config = config
         self.emit = emit
         self.browser = self.context = self.page = None
+        self.browser_label = '浏览器'
+        self.browser_kind = None
         self.saved = False
         self.last_confirmation = None
         self.last_probe = 0
         self.attempts = 0
         self.last_submission = 0
         self.captcha_source = None
+        self.captcha_digest = None
         self.paths = {key: session_path(config, key) for key in (
             'cookies_file', 'storage_state_file', 'session_storage_file')}
         if len(set(self.paths.values())) != len(self.paths):
             raise FlowError('会话保存的三个文件路径不能相同。')
         self.url = appointment_url(config)
 
+    def launch(self, playwright, headless=False):
+        self.browser, choice = launch_browser(playwright, self.config, headless=headless)
+        self.browser_label = choice.label
+        self.browser_kind = choice.kind
+        self.emit('status', '已启动' + self.browser_label + '独立窗口。')
+
     def start(self, playwright, restore=False, headless=False):
-        self.browser = playwright.chromium.launch(channel='chrome', headless=headless)
+        self.launch(playwright, headless=headless)
         self.context = self.new_context(restore)
         self.page = self.context.new_page()
         self.page.goto(self.url, wait_until='domcontentloaded', timeout=45000)
@@ -100,6 +120,8 @@ class LoginBrowser:
         except Exception:
             if urlsplit(self.page.url).hostname != LOGIN_HOST and not self.client_logged_in():
                 raise FlowError('未找到校内登录入口，请检查网站连接后重新打开。') from None
+        self.emit('status', '正在等待jAccount账号密码登录页加载……')
+        self.ensure_login_form()
         self.emit('status', '登录页已打开。可直接在浏览器里输入账号、密码和图片验证码。')
 
     def new_context(self, restore=False):
@@ -121,9 +143,17 @@ class LoginBrowser:
         return context
 
     def ensure_login_form(self):
-        if not self.page or self.page.is_closed() or urlsplit(self.page.url).hostname != LOGIN_HOST:
+        if not self.page or self.page.is_closed():
             raise FlowError('请先打开 jAccount 的账号密码登录页。')
-        self.page.locator('#input-login-user').wait_for(state='visible', timeout=5000)
+        parts = urlsplit(self.page.url)
+        if parts.scheme != 'https' or parts.hostname not in (HOST, LOGIN_HOST):
+            raise FlowError('请先打开 jAccount 的账号密码登录页。')
+        try:
+            # The school's entry may redirect asynchronously; Edge's cold page
+            # load can also exceed the previous five-second field timeout.
+            self.page.wait_for_function(LOGIN_FORM_READY, arg=LOGIN_HOST, timeout=30000)
+        except Exception:
+            raise FlowError('等待jAccount登录输入框超时或页面已关闭。请检查网络后重新打开登录页，或在浏览器手动登录。') from None
 
     def fill_credentials(self, username, password):
         self.ensure_login_form()
@@ -133,23 +163,48 @@ class LoginBrowser:
         self.page.locator('#input-login-pass').fill(password)
         self.emit('status', '账号密码已填入 jAccount；没有写入日志。')
 
-    def capture_captcha(self):
+    def invalidate_captcha(self):
+        self.captcha_source = self.captcha_digest = None
+        self.emit('code', '')
+        self.emit('image', None)
+
+    def read_captcha(self):
         self.ensure_login_form()
         image = self.page.locator('#captcha-img')
         image.wait_for(state='visible', timeout=5000)
-        self.page.wait_for_function("() => {const e=document.querySelector('#captcha-img');return e && e.complete && e.naturalWidth > 0;}")
-        image_bytes = image.screenshot(type='png', animations='disabled')
-        self.captcha_source = image.get_attribute('src')
+        try:
+            self.page.wait_for_function("() => {const e=document.querySelector('#captcha-img');return e && e.complete && e.naturalWidth > 0;}", timeout=5000)
+            return decode_native_image(image.evaluate(NATIVE_IMAGE_JS))
+        except Exception:
+            raise FlowError('验证码原图无法读取，请刷新图片或在浏览器手动登录。') from None
+
+    def capture_captcha(self):
+        self.invalidate_captcha()
+        source, image_bytes = self.read_captcha()
+        self.captcha_source = source
+        self.captcha_digest = hashlib.sha256(image_bytes).hexdigest()
         self.emit('image', image_bytes)
         return image_bytes
 
     def refresh_captcha(self):
         self.ensure_login_form()
-        self.page.locator('#captcha-img').click()
+        self.invalidate_captcha()
+        image = self.page.locator('#captcha-img')
+        image.evaluate("""image => {
+            const state = image.__sjtuFitRefresh = {loaded: false};
+            image.addEventListener('load', () => state.loaded = true, {once: true});
+        }""")
+        image.click()
         self.page.locator('#input-login-captcha').fill('')
-        self.captcha_source = None
-        self.emit('code', '')
-        self.emit('status', '验证码已刷新，请重新截图或识别。')
+        try:
+            self.page.wait_for_function("""() => {
+                const image = document.querySelector('#captcha-img');
+                return image && image.__sjtuFitRefresh?.loaded && image.complete && image.naturalWidth > 0;
+            }""", timeout=10000)
+            self.capture_captcha()
+        except Exception:
+            raise FlowError('新验证码尚未加载，请重试刷新或在浏览器手动登录。') from None
+        self.emit('status', '已显示新的完整验证码，可手动输入或点击本地识别。')
 
     def submit_captcha(self, code):
         from captcha import normalize_code
@@ -159,7 +214,15 @@ class LoginBrowser:
         if time.monotonic() - self.last_submission < 15:
             raise FlowError('请等待至少 15 秒再尝试下一次登录。')
         if self.captcha_source and self.page.locator('#captcha-img').get_attribute('src') != self.captcha_source:
-            raise FlowError('浏览器中的验证码已变化，请重新截图或识别。')
+            self.invalidate_captcha()
+            raise FlowError('浏览器中的验证码已变化，请点击“显示当前图片”后重新输入。')
+        if not self.captcha_source or not self.captcha_digest:
+            raise FlowError('请先点击“显示当前图片”，查看完整验证码后再输入。')
+        if self.captcha_digest:
+            source, image_bytes = self.read_captcha()
+            if source != self.captcha_source or hashlib.sha256(image_bytes).hexdigest() != self.captcha_digest:
+                self.invalidate_captcha()
+                raise FlowError('浏览器中的验证码已变化，请点击“显示当前图片”后重新输入。')
         if not self.page.locator('#input-login-user').input_value().strip() or not self.page.locator('#input-login-pass').input_value():
             raise FlowError('浏览器里还没有填写完整账号和密码。')
         self.page.locator('#input-login-captcha').fill(normalize_code(code))
@@ -173,7 +236,7 @@ class LoginBrowser:
         from captcha import CaptchaError, recognize_ocr
         if not 1 <= max_attempts <= 2:
             raise FlowError('自动登录最多尝试2次。')
-        report = {'schema_version':1,'kind':'login','engine':'ddddocr-1.6.1-cpu',
+        report = {'schema_version':1,'kind':'login','engine':'ddddocr-1.6.1-cpu','browser':self.browser_kind,
             'started_at':datetime.now(timezone.utc).isoformat(),'authenticated':False,'attempts':[],
             'manual_required':True}
         for index in range(max_attempts):
@@ -231,8 +294,10 @@ class LoginBrowser:
         report['captcha_pass_rate']=report['captcha_passed']/report['server_known_attempts'] if report['server_known_attempts'] else None
         atomic_json(ROOT/'.local/captcha/last-login.json',report)
         if report['manual_required']:
-            self.captcha_source=None
-            self.emit('code','')
+            self.invalidate_captcha()
+            try: self.capture_captcha()
+            except Exception: pass
+            self.emit('manual-captcha', None)
         self.emit('status','自动登录成功，正在保存会话。' if report['authenticated'] else '自动登录已停止，请在当前浏览器手动登录。')
         return report
 
@@ -348,6 +413,7 @@ class LoginBrowser:
         self.emit('status', '登录与会话恢复成功，已保存实际预约页资料。浏览器保持打开，可查看日期和时段。')
 
     def close(self):
-        if self.browser:
-            self.browser.close()
+        browser = self.browser
         self.browser = self.context = self.page = None
+        if browser:
+            browser.close()

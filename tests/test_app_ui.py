@@ -1,4 +1,5 @@
-"""Unified window lifecycle and task coordination without website or mail actions."""
+"""Three-page navigation and task isolation, using fixture configs and no real workers."""
+from dataclasses import asdict
 from pathlib import Path
 import sys
 import tempfile
@@ -6,129 +7,131 @@ import tkinter as tk
 import unittest
 from unittest.mock import MagicMock, patch
 
-sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from app_ui import FitnessApp
-import poller_ui
+from configuration import read_config, write_config, ConfigError
+import desktop_worker
 import login as login_ui
-from configuration import ConfigError
-from test_selection_ui import prepared
+from test_polling import mailbox
 
 
 class UnifiedAppTests(unittest.TestCase):
     def setUp(self):
-        self.temporary=tempfile.TemporaryDirectory();self.addCleanup(self.temporary.cleanup)
-        path=Path(self.temporary.name)/'reservation.toml'
-        path.write_text((Path(__file__).resolve().parents[1]/'config/config.example.toml').read_text(encoding='utf-8'),encoding='utf-8')
-        self.path=path
-        self.settings_patch=patch.object(poller_ui,'SETTINGS_PATH',path);self.settings_patch.start()
-        self.addCleanup(self.settings_patch.stop)
-        self.window=tk.Tk();self.window.withdraw()
-        self.app=FitnessApp(self.window,start_workers=False,config_loader=lambda:{'auth':{}})
+        temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.path = self.root / 'config.toml'
+        self.path.write_text((Path(__file__).resolve().parents[1] / 'config/config.example.toml').read_text(encoding='utf-8'), encoding='utf-8')
+        config = read_config(self.path); config['mail'] = asdict(mailbox()); write_config(config, self.path)
+        self.window = tk.Tk(); self.window.withdraw()
+        self.app = FitnessApp(self.window, start_workers=False, config_path=self.path, records_root=self.root)
 
     def tearDown(self):
         if not self.app.closed:
             for component in self.app.components.values():
-                if hasattr(component,'pending'): component.pending=False
-                if hasattr(component,'busy'): component.busy=False
+                if hasattr(component, 'login'): component.login.pending = False; component.mail.busy = False
+                elif hasattr(component, 'busy'): component.busy = False
             self.app.close()
 
-    def test_plain_start_opens_only_home_without_any_worker(self):
-        self.assertEqual(self.app.components,{})
-        self.assertEqual(self.app.current_page,'home')
-        self.assertEqual(self.window.title(),'交大健身房助手')
-        self.assertEqual(len(self.app.home_buttons),4)
+    def test_plain_start_has_only_three_entries_and_no_order_or_mail_worker(self):
+        self.assertEqual(tuple(self.app.PAGES.values()), ('自动预约', '记录', '设置'))
+        self.assertEqual(self.app.current_page, 'auto')
+        self.assertEqual(set(self.app.components), {'auto'})
+        self.assertIsNone(self.app.components['auto'].process)
+        self.assertIsNone(self.app.mail_service.thread)
+        self.assertNotIn('booking', self.app.PAGES)
 
-    def test_pages_reuse_one_window_and_preserve_selection(self):
-        self.app.show_page('login');login=self.app.components['login']
-        self.assertIs(login.root,self.window)
-        self.assertIsNone(login.worker);self.assertTrue(login.commands.empty())
-        self.app.show_page('booking');booking=self.app.components['booking']
-        self.assertIs(booking.window,self.window)
-        booking.duration.set('连续2小时');booking.change_duration();booking.period.set('18:00-20:00')
-        self.app.show_page('waitlist');polling=self.app.components['polling']
-        self.assertIs(polling.window,self.window);self.assertIsNone(polling.process)
-        self.assertEqual(polling.tabs.select(),str(polling.waitlist_tab))
-        polling.waitlist_vars['interval_seconds'].set('90')
-        self.app.show_page('mail');self.assertIs(self.app.components['polling'],polling)
-        self.assertEqual(polling.tabs.select(),str(polling.mail_tab))
-        self.app.show_page('daily');self.assertEqual(polling.tabs.select(),str(polling.booking_tab))
-        self.app.show_page('booking')
-        self.assertIs(self.app.components['booking'],booking)
-        self.assertEqual(booking.period.get(),'18:00-20:00')
-        self.assertEqual(polling.waitlist_vars['interval_seconds'].get(),'90')
-        self.assertEqual(self.window.title(),'交大健身房助手')
-        self.assertFalse(any(isinstance(child,tk.Toplevel) for child in self.window.winfo_children()))
+    def test_navigation_reuses_window_and_preserves_plan_drafts(self):
+        automatic = self.app.components['auto']
+        automatic.variables['interval_seconds'].set('90')
+        automatic.time_picker.duration.set('连续2小时'); automatic.time_picker.refresh_choices()
+        automatic.time_picker.selected.set('18:00-20:00')
+        self.app.show_page('records'); records = self.app.components['records']
+        self.app.show_page('settings'); settings = self.app.components['settings']
+        self.assertIs(settings.login.root, self.window); self.assertIsNone(settings.login.worker)
+        self.app.show_page('auto')
+        self.assertIs(self.app.components['auto'], automatic)
+        self.assertEqual(automatic.variables['interval_seconds'].get(), '90')
+        self.assertEqual(automatic.time_picker.get(), ['18:00-20:00'])
+        self.assertIsNone(records.process); self.assertFalse(settings.pending); self.assertFalse(settings.busy)
+        self.assertFalse(any(isinstance(child, tk.Toplevel) for child in self.window.winfo_children()))
 
-    def test_active_booking_blocks_login_polling_and_config_writes(self):
-        for page in ('login','booking','daily'): self.app.show_page(page)
-        booking=self.app.components['booking'];login=self.app.components['login'];polling=self.app.components['polling']
-        old_config=self.path.read_bytes();booking.busy=True
-        login.enqueue('open')
-        self.assertTrue(login.commands.empty());self.assertFalse(login.pending)
-        with patch.object(poller_ui.subprocess,'Popen') as launch:
-            polling.launch('waitlist');launch.assert_not_called()
-        with patch.object(login_ui,'update_config') as save:
-            login.save_credentials();save.assert_not_called()
-        self.assertFalse(polling.save_form());self.assertEqual(self.path.read_bytes(),old_config)
-        self.assertIn('单次预约',polling.status.get())
-        booking.busy=False
+    def test_running_reservation_blocks_login_and_settings_writes(self):
+        self.app.show_page('settings'); settings = self.app.components['settings']
+        automatic = self.app.components['auto']
+        automatic.busy = True; automatic.running_command = 'waitlist'
+        before = self.path.read_bytes()
+        settings.login.enqueue('open')
+        self.assertFalse(settings.login.pending); self.assertTrue(settings.login.commands.empty())
+        self.assertFalse(settings.mail.save())
+        with patch.object(login_ui, 'update_config') as save:
+            settings.login.save_credentials(); save.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertIn('自动预约', settings.status.get())
+        automatic.busy = False
 
-    def test_account_save_is_explicit_and_never_displays_credentials(self):
-        with patch.object(login_ui,'update_config') as save:
-            self.app.show_page('login');login=self.app.components['login']
-            login.username.set('EXAMPLE-STUDENT');login.password.set('EXAMPLE-PRIVATE-PASSWORD')
-            save.assert_not_called()
-            login.pending=True;login.save_credentials();save.assert_not_called()
-            login.pending=False
-            save.return_value={'auth':{**login.credentials(),'cookies_file':'.local/auth/cookies.json'}}
-            login.save_credentials()
-            save.assert_called_once_with({'auth':login.credentials()},path=login.config_path)
-            self.assertEqual(login.config['auth']['cookies_file'],'.local/auth/cookies.json')
-            self.assertNotIn('EXAMPLE',login.status.get())
-            save.side_effect=ConfigError('配置未保存，请检查本地文件权限。')
-            login.save_credentials();self.assertNotIn('EXAMPLE',login.status.get())
-
-    def test_page_switch_during_polling_keeps_job_running_and_blocks_new_booking(self):
-        self.app.show_page('daily');polling=self.app.components['polling']
-        polling.busy=True;polling.running_command='waitlist';polling.stop=MagicMock()
-        self.app.show_page('booking');booking=self.app.components['booking']
-        booking.run('inspect',booking.selection());self.assertFalse(booking.busy)
-        self.app.show_page('home');self.assertTrue(polling.busy)
+    def test_page_switch_keeps_reservation_running_and_blocks_second_worker(self):
+        automatic = self.app.components['auto']
+        automatic.busy = True; automatic.running_command = 'run'; automatic.stop = MagicMock()
+        self.app.show_page('records')
+        with patch.object(desktop_worker.subprocess, 'Popen') as launched:
+            self.app.components['records'].reconcile(); launched.assert_not_called()
         self.app.refresh_status()
-        self.assertEqual(str(self.app.stop_button.cget('state')),'normal')
-        self.app.stop_polling();polling.stop.assert_called_once()
-        polling.busy=False
+        self.assertEqual(str(self.app.stop_button.cget('state')), 'normal')
+        self.app.stop_polling(); automatic.stop.assert_called_once()
+        self.assertTrue(automatic.busy); automatic.busy = False
 
-    def test_close_requests_stop_and_waits_for_order_verification(self):
-        self.app.show_page('waitlist');polling=self.app.components['polling']
-        polling.busy=True;polling.running_command='waitlist';polling.stop=MagicMock()
+    def test_account_save_remains_explicit_and_private(self):
+        self.app.show_page('settings'); login = self.app.components['settings'].login
+        with patch.object(login_ui, 'update_config') as save:
+            login.username.set('EXAMPLE-STUDENT'); login.password.set('EXAMPLE-PRIVATE-PASSWORD')
+            save.assert_not_called()
+            save.return_value = {'auth': login.credentials()}
+            login.save_credentials()
+            save.assert_called_once_with({'auth': login.credentials()}, path=self.path)
+            self.assertNotIn('EXAMPLE', login.status.get())
+
+    def test_compact_login_exposes_automatic_and_manual_actions(self):
+        self.app.show_page('settings'); login = self.app.components['settings'].login
+        labels = [button.cget('text') for button in login.buttons]
+        self.assertIn('自动登录', labels); self.assertIn('浏览器手动登录', labels)
+        self.assertNotIn('填入浏览器', labels)
+        self.assertFalse(login.more_login.get())
+        self.assertEqual(login.advanced_login.winfo_manager(), '')
+
+    def test_close_stops_polling_and_waits_for_order_verification(self):
+        automatic = self.app.components['auto']
+        automatic.busy = True; automatic.running_command = 'waitlist'; automatic.stop = MagicMock()
         self.app.close()
-        self.assertTrue(self.app.closing);self.assertFalse(self.app.closed)
-        self.assertTrue(self.window.winfo_exists());polling.stop.assert_called_once()
-        self.assertFalse(self.app.allow_action('polling'))
-        self.app.close();polling.stop.assert_called_once()
-        polling.busy=False
-        self.app.close();self.assertTrue(self.app.closed)
+        self.assertTrue(self.app.closing); self.assertFalse(self.app.closed)
+        automatic.stop.assert_called_once()
+        self.app.close(); automatic.stop.assert_called_once()
+        automatic.busy = False; self.app.close(); self.assertTrue(self.app.closed)
 
-    def test_closing_unsubmitted_terms_does_not_create_order(self):
-        self.app.show_page('booking');booking=self.app.components['booking']
-        booking.prepared=prepared();booking.run=MagicMock()
-        booking.confirm();self.assertIsNotNone(booking.review)
+    def test_close_waits_for_current_mail_delivery(self):
+        self.app.mail_service.close = MagicMock(return_value=False)
+        self.app.close(); self.assertFalse(self.app.closed)
+        self.app.mail_service.close.return_value = True
+        self.app.close(); self.assertTrue(self.app.closed)
+
+    def test_close_waits_for_login_browser_worker_to_exit(self):
+        self.app.show_page('settings')
+        login = self.app.components['settings'].login
+        login.worker = MagicMock()
+        login.worker.is_alive.return_value = True
         self.app.close()
-        self.assertTrue(self.app.closed);booking.run.assert_not_called()
+        self.assertFalse(self.app.closed)
+        self.assertTrue(self.window.winfo_exists())
+        login.worker.join.assert_not_called()
+        login.worker.is_alive.return_value = False
+        self.app.close()
+        self.assertTrue(self.app.closed)
 
-    def test_disposing_embedded_module_does_not_destroy_main_window(self):
-        self.app.show_page('login');login=self.app.components['login']
-        self.assertTrue(login.close());self.assertTrue(self.window.winfo_exists())
-        self.app.show_page('booking');booking=self.app.components['booking']
-        self.assertTrue(booking.close());self.assertTrue(self.window.winfo_exists())
-
-    def test_failed_local_configuration_does_not_expose_secret_exception(self):
-        self.app.config_loader=MagicMock(side_effect=ValueError('EXAMPLE-PRIVATE-SECRET'))
-        self.app.show_page('login')
-        self.assertNotIn('login',self.app.components);self.assertNotIn('login',self.app.frames)
-        self.assertNotIn('EXAMPLE',self.app.task_status.get())
-        self.assertEqual(self.app.current_page,'home')
+    def test_failed_account_config_cannot_expose_private_exception(self):
+        self.app.config_loader = MagicMock(side_effect=ValueError('EXAMPLE-PRIVATE-SECRET'))
+        self.app.show_page('settings')
+        self.assertNotIn('settings', self.app.components)
+        self.assertNotIn('EXAMPLE', self.app.task_status.get())
+        self.assertEqual(self.app.current_page, 'auto')
 
 
-if __name__=='__main__': unittest.main()
+if __name__ == '__main__': unittest.main()

@@ -1,5 +1,14 @@
 # 首次启动自动复制为config/config.toml。只在本地填写；不要上传个人配置。
 # 登录、预约、轮询和邮件统一使用这一份文件。
+[ui]
+# 自动预约页默认打开的计划：waitlist指定日期；daily每日12点开抢。
+reservation_mode = "waitlist"
+
+[browser]
+# auto自动检测，优先Chrome；chrome指定Chrome；edge指定Microsoft Edge。
+# 在“设置 → 账号与登录”选择后自动保存，登录与预约共用。
+preferred = "auto"
+
 [site]
 appointment_url = "https://sports.sjtu.edu.cn/pc/#/apointmentDetails/1/d784ad7c-cb24-4282-afd6-a67aec68c675/%25E5%2585%25A8%25E9%2583%25A8/0"
 timezone = "Asia/Shanghai"
@@ -17,10 +26,16 @@ session_storage_file = ".local/auth/session-storage.json"
 enabled = false
 interval_seconds = 60
 window_minutes = 15
-max_checks = 15
+# duration按每天12:00起的持续时长（1～1440分钟）；deadline指定整体截止时间。
+stop_mode = "duration"
+stop_at = ""
+# 0按时间上限运行；命令行仍兼容显式设置额外查询次数上限。
+max_checks = 0
 manual_timeout_seconds = 300
 
 [booking]
+# 每日开抢页选择项目；可同步网站当前支持的项目与时段。
+activity = "健身房"
 # 从每日开抢页添加候选。单个候选18:00-20:00表示连续2小时。
 # 两个候选18:00-19:00和19:00-20:00表示备选，不表示同时预约。
 time_slots = []
@@ -28,12 +43,18 @@ field = ""
 
 [waitlist]
 # 从候补页选择固定日期/时段，不要求polling.enabled。
+activity = "健身房"
 date = ""
 time = ""
 field = ""
 # now立即开始；scheduled按照北京时间start_at开始。
 start_mode = "now"
 start_at = ""
+# slot到目标时段开始；duration按计划启动时间起算；deadline到指定时间。
+stop_mode = "slot"
+duration_minutes = 60
+# 选deadline时，例如2026-10-18T22:00:00+08:00；请按自己的计划填写。
+stop_at = ""
 interval_seconds = 60
 manual_timeout_seconds = 300
 

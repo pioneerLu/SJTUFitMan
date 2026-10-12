@@ -96,8 +96,8 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings().next_release(datetime(2026,10,11,12,7,tzinfo=BEIJING)).hour,12)
     def test_limits_and_invalid_times_are_rejected(self):
         good={'polling':{'enabled':True},'booking':{'time_slots':['18:00-19:00']}}
-        for key,value in [('interval_seconds',19),('interval_seconds',True),('window_minutes',61),
-                ('max_checks',0),('manual_timeout_seconds',301)]:
+        for key,value in [('interval_seconds',19),('interval_seconds',True),('window_minutes',1441),
+                ('max_checks',-1),('manual_timeout_seconds',301)]:
             raw={**good,'polling':{key:value}}
             with self.subTest(key=key,value=value),self.assertRaises(SettingsError): PollSettings.read(raw)
         for times in ([],['23:00-00:00'],['18:30-19:30'],['18:00-21:00'],['18:00-19:00']*2):
@@ -131,6 +131,7 @@ class RunnerTests(unittest.TestCase):
     def setUp(self):
         self.temporary=tempfile.TemporaryDirectory();self.addCleanup(self.temporary.cleanup)
         self.root=Path(self.temporary.name);self.clock=Clock();self.event=threading.Event()
+        stop_path=patch.object(runner,'STOP',self.root/'stop.json');stop_path.start();self.addCleanup(stop_path.stop)
         self.store=runner.DailyStore(self.root/'days.json');self.journal=booking.Journal(self.root/'journal.json')
         self.messages=[];self.notified=[]
     def make_runner(self,config=None,notifier=None,validate=None):
@@ -205,6 +206,19 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(self.run_day(browser)['phase'],'attention')
         again=Browser(self.clock,[snapshot()]);self.run_day(again)
         self.assertEqual((browser.commits,again.commits,len(self.notified)),(1,0,0))
+    def test_website_rejection_details_reach_polling_status_without_another_submission(self):
+        browser=Browser(self.clock,[snapshot(),snapshot()]);browser.outcome='rejected'
+        commit=browser.commit
+        def denied(*args,**kwargs):
+            result=commit(*args,**kwargs)
+            result['server_feedback']={'http_status':200,'code':1003,'message':'已达到预约次数上限'}
+            return result
+        browser.commit=denied
+        result=self.run_day(browser)
+        self.assertEqual((result['phase'],browser.commits,len(self.notified)),('attention',1,0))
+        self.assertIn('已达到预约次数上限',self.messages[-1][1])
+        self.assertIn('错误码 1003',self.messages[-1][1])
+        self.assertEqual(result['result']['server_feedback']['code'],1003)
     def test_preexisting_unresolved_order_stops_all_new_dates(self):
         self.journal.begin(Browser.account,target_slot(day='2026-10-17'),[])
         browser=Browser(self.clock,[snapshot()]);self.assertEqual(self.run_day(browser)['phase'],'attention')
@@ -322,9 +336,9 @@ class MailTests(unittest.TestCase):
         body=calls[0].get_content()
         self.assertIn('2026-10-18',body);self.assertIn('12:00:01',body)
         self.assertNotIn(self.config.password,body)
-    def test_simulated_or_unverified_or_paid_orders_cannot_send(self):
+    def test_simulated_or_unverified_or_unsuccessful_orders_cannot_send(self):
         box=self.outbox(MagicMock())
-        for changed in ({'simulated':True},{'real_order_created':False},{'phase':'accepted'},{'state':'1'}, {'order_id':'a\nb'}):
+        for changed in ({'simulated':True},{'real_order_created':False},{'phase':'accepted'},{'state':'3'}, {'order_id':'a\nb'}):
             with self.subTest(changed=changed),self.assertRaises(booking.BookingError):
                 box.enqueue('account',{**order(),**changed},self.config)
         self.assertEqual(box.records,[])
@@ -336,13 +350,16 @@ class MailTests(unittest.TestCase):
         for _ in range(3):
             self.clock.advance(60);box=self.outbox(sender);box.deliver(box.records[0],self.config)
         self.assertEqual(sender.call_count,3)
-    def test_ambiguous_smtp_delivery_is_not_automatically_retried(self):
+    def test_ambiguous_smtp_delivery_is_retried_with_a_bound(self):
         def ambiguous(config,message,before): before();raise OSError('after DATA')
         sender=MagicMock(side_effect=ambiguous)
         box=self.outbox(sender);item=box.enqueue('account',order(),self.config)
         self.assertEqual(box.deliver(item,self.config),'unknown')
         self.clock.advance(600);restored=self.outbox(sender);restored.deliver(restored.records[0],self.config)
-        self.assertEqual(sender.call_count,1)
+        self.assertEqual(sender.call_count,2)
+        for _ in range(3):
+            self.clock.advance(600);restored=self.outbox(sender);restored.deliver(restored.records[0],self.config)
+        self.assertEqual(sender.call_count,3)
     def test_crash_while_sending_recovers_unknown_and_crash_before_data_retryable(self):
         for phase,expected in [('sending','unknown'),('connecting','retryable')]:
             box=self.outbox(MagicMock());item=box.enqueue('account',order(),self.config)

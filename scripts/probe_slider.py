@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import sys
 
-from playwright.sync_api import sync_playwright
+from playwright_runtime import sync_playwright
 from booking_flow import BookingBrowser
 from login_flow import atomic_json, load_config
 from configuration import CONFIG_PATH

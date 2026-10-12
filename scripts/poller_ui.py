@@ -13,8 +13,9 @@ from datetime import timedelta
 from booking_flow import BookingError
 from login_flow import atomic_json
 from poll_runner import STATUS, STOP
+from booking_feedback import failure_detail
 from poll_settings import SETTINGS_PATH, PollSettings, WaitlistSettings, beijing_now, load_settings, load_mail_settings, load_waitlist_settings
-from booking_options import GYM_TIME_SLOTS, date_label, date_value, local_dates, period_choices
+from booking_options import DEFAULT_ACTIVITIES, GYM_TIME_SLOTS, date_label, date_value, local_dates, period_choices
 from selection_widgets import TimeSlotPicker
 from runtime import worker_command
 from session import ROOT
@@ -66,13 +67,27 @@ class PollerApp:
         enabled=ttk.Checkbutton(booking,text='启用每日预约（保存后还需点击启动）',variable=self.enabled)
         enabled.grid(row=0,column=0,columnspan=2,sticky='w',pady=5)
         self.inputs.append(enabled)
-        ttk.Label(booking,text='预约日期').grid(row=1,column=0,sticky='nw',padx=(0,18),pady=5)
+        ttk.Label(booking,text='预约项目').grid(row=1,column=0,sticky='w',padx=(0,18),pady=5)
+        project=ttk.Frame(booking);project.grid(row=1,column=1,sticky='ew',pady=5)
+        self.daily_activity=tk.StringVar(value='健身房')
+        self.variables['activity']=self.daily_activity
+        self.daily_activity_choice=ttk.Combobox(project,textvariable=self.daily_activity,
+            values=DEFAULT_ACTIVITIES,state='readonly',width=16)
+        self.daily_activity_choice.pack(side='left',fill='x',expand=True)
+        self.daily_activity_choice.bind('<<ComboboxSelected>>',self.change_daily_activity)
+        self.inputs.append(self.daily_activity_choice);self.readonly_inputs.append(self.daily_activity_choice)
+        self.daily_sync_button=ttk.Button(project,text='同步项目和时段',command=self.sync_daily_options)
+        self.daily_sync_button.pack(side='left',padx=(10,0));self.extra_buttons.append(self.daily_sync_button)
+        ttk.Label(booking,text='预约日期').grid(row=2,column=0,sticky='nw',padx=(0,18),pady=5)
         self.date_preview=tk.StringVar()
-        ttk.Label(booking,textvariable=self.date_preview,wraplength=540).grid(row=1,column=1,sticky='w',pady=5)
-        ttk.Label(booking,text='候选时段（按优先顺序）').grid(row=2,column=0,sticky='nw',padx=(0,18),pady=5)
+        ttk.Label(booking,textvariable=self.date_preview,wraplength=540).grid(row=2,column=1,sticky='w',pady=5)
+        ttk.Label(booking,text='候选时段（按优先顺序）').grid(row=3,column=0,sticky='nw',padx=(0,18),pady=5)
         self.time_picker=TimeSlotPicker(booking)
-        self.time_picker.grid(row=2,column=1,sticky='ew',pady=5)
-        self.entry(booking,3,'field','指定场地，可留空','')
+        self.time_picker.grid(row=3,column=1,sticky='ew',pady=5)
+        self.entry(booking,4,'field','指定场地，可留空','')
+        self.daily_options_hint=tk.StringVar(value='可同步所选项目的网站时段；预约日期自动设为开抢日的七天后。')
+        ttk.Label(booking,textvariable=self.daily_options_hint,foreground='#666666',wraplength=680).grid(
+            row=5,column=0,columnspan=2,sticky='w',pady=5)
         for row,(key,label,default) in enumerate([
             ('interval_seconds','两次余量检查间隔（秒，20～600）','60'),
             ('window_minutes','12:00后检查多少分钟（1～60）','15'),
@@ -101,7 +116,7 @@ class PollerApp:
         ttk.Label(outer,textvariable=self.status,wraplength=820,font=('Microsoft YaHei UI',10)).pack(anchor='w',pady=(0,8))
         self.text=tk.Text(outer,wrap='word',font=('Microsoft YaHei UI',10),height=8)
         self.text.pack(fill='both',expand=True)
-        self.show('程序需保持运行，电脑需开机联网。休眠或关机期间无法预约。\n\n邮件授权码不会显示在运行记录中。验证码失败时会打开Chrome供你手动处理；登录失败、被限频或下单结果不明时停止任务。\n\n成功后请尽快在体育平台个人订单付款，期限以平台显示为准。')
+        self.show('程序需保持运行，电脑需开机联网。休眠或关机期间无法预约。\n\n邮件授权码不会显示在运行记录中。验证码失败时会打开所选浏览器供你手动处理；登录失败、被限频或下单结果不明时停止任务。\n\n成功后请尽快在体育平台个人订单付款，期限以平台显示为准。')
         self.read_form()
         self.update_date_preview()
         if not self.embedded: window.protocol('WM_DELETE_WINDOW',self.close)
@@ -120,32 +135,34 @@ class PollerApp:
             self.inputs.append(widget);self.readonly_inputs.append(widget)
             return widget
         dates=local_dates(current.date())
-        self.waitlist_date_choice=choice(0,'date','预约日期',dates,dates[0])
-        period_frame=ttk.Frame(frame);period_frame.grid(row=1,column=1,sticky='ew')
-        ttk.Label(frame,text='预约时长和时段').grid(row=1,column=0,sticky='w',pady=5)
+        self.waitlist_activity_choice=choice(0,'activity','预约项目',DEFAULT_ACTIVITIES,'健身房')
+        self.waitlist_activity_choice.bind('<<ComboboxSelected>>',self.change_waitlist_activity)
+        self.waitlist_date_choice=choice(1,'date','预约日期',dates,dates[0])
+        period_frame=ttk.Frame(frame);period_frame.grid(row=2,column=1,sticky='ew')
+        ttk.Label(frame,text='预约时长和时段').grid(row=2,column=0,sticky='w',pady=5)
         self.waitlist_duration_choice=choice(0,'duration','',('1小时','连续2小时'),'1小时',period_frame,0,10)
         self.waitlist_time_choice=choice(0,'time','',GYM_TIME_SLOTS,'18:00-19:00',period_frame,1,18)
         self.waitlist_hours=GYM_TIME_SLOTS
         self.waitlist_duration_choice.bind('<<ComboboxSelected>>',self.waitlist_period_choices)
-        self.waitlist_mode_choice=choice(2,'start_mode','开始方式',('立即开始','定时开始'),'立即开始')
+        self.waitlist_mode_choice=choice(3,'start_mode','开始方式',('立即开始','定时开始'),'立即开始')
         self.waitlist_mode_choice.bind('<<ComboboxSelected>>',lambda event:self.update_waitlist_controls())
-        schedule=ttk.Frame(frame);schedule.grid(row=3,column=1,sticky='ew')
-        ttk.Label(frame,text='开始时间（北京时间）').grid(row=3,column=0,sticky='w',pady=5)
+        schedule=ttk.Frame(frame);schedule.grid(row=4,column=1,sticky='ew')
+        ttk.Label(frame,text='开始时间（北京时间）').grid(row=4,column=0,sticky='w',pady=5)
         self.waitlist_schedule_date=choice(0,'start_date','',dates,dates[0],schedule,0,21)
         self.waitlist_schedule_hour=choice(0,'start_hour','',tuple(f'{h:02d}' for h in range(24)),f'{current.hour:02d}',schedule,1,3)
         ttk.Label(schedule,text=':').grid(row=0,column=2)
         self.waitlist_schedule_minute=choice(0,'start_minute','',tuple(f'{m:02d}' for m in range(60)),f'{current.minute:02d}',schedule,3,3)
-        for row,key,label,default in [(4,'interval_seconds','余量检查间隔（秒，20～600）','60'),(5,'field','指定场地，可留空','')]:
+        for row,key,label,default in [(5,'interval_seconds','余量检查间隔（秒，20～600）','60'),(6,'field','指定场地，可留空','')]:
             variable=tk.StringVar(value=default);self.waitlist_vars[key]=variable
             ttk.Label(frame,text=label).grid(row=row,column=0,sticky='w',padx=(0,18),pady=5)
             widget=ttk.Entry(frame,textvariable=variable);widget.grid(row=row,column=1,sticky='ew',pady=5)
             self.inputs.append(widget)
         self.waitlist_hint=tk.StringVar(value='本地日期和时段选项；可同步网站当前开放选项。')
-        ttk.Label(frame,textvariable=self.waitlist_hint,foreground='#666666',wraplength=720).grid(row=6,column=0,columnspan=2,sticky='w',pady=5)
-        controls=ttk.Frame(frame);controls.grid(row=7,column=0,columnspan=2,sticky='w',pady=5)
+        ttk.Label(frame,textvariable=self.waitlist_hint,foreground='#666666',wraplength=720).grid(row=7,column=0,columnspan=2,sticky='w',pady=5)
+        controls=ttk.Frame(frame);controls.grid(row=8,column=0,columnspan=2,sticky='w',pady=5)
         for label,callback in [('同步网站选项',lambda:self.launch('options')),('启动退选候补',self.start_waitlist)]:
             button=ttk.Button(controls,text=label,command=callback);button.pack(side='left',padx=(0,10));self.extra_buttons.append(button)
-        ttk.Label(frame,text='持续查询至成功或目标时段开始；两小时必须同一场地同时有余量。',foreground='#666666').grid(row=8,column=0,columnspan=2,sticky='w')
+        ttk.Label(frame,text='持续查询至成功或目标时段开始；两小时必须同一场地同时有余量。',foreground='#666666').grid(row=9,column=0,columnspan=2,sticky='w')
         frame.columnconfigure(1,weight=1)
 
     def waitlist_period_choices(self, event=None):
@@ -155,6 +172,14 @@ class PollerApp:
         if previous not in choices:
             self.waitlist_vars['time'].set(next((period for period in choices if period[:5]==previous[:5]),choices[0] if choices else ''))
 
+    def change_waitlist_activity(self,event=None):
+        self.waitlist_hours=()
+        self.waitlist_vars['time'].set('')
+        self.waitlist_vars['field'].set('')
+        self.waitlist_date_choice.configure(values=local_dates(beijing_now().date()))
+        self.waitlist_period_choices()
+        self.waitlist_hint.set('项目已更改，请同步网站选项后选择日期和时段。')
+
     def update_waitlist_controls(self):
         scheduled=self.waitlist_vars['start_mode'].get()=='定时开始'
         for widget in (self.waitlist_schedule_date,self.waitlist_schedule_hour,self.waitlist_schedule_minute):
@@ -162,7 +187,7 @@ class PollerApp:
 
     def waitlist_values(self):
         values={key:variable.get().strip() for key,variable in self.waitlist_vars.items()}
-        return {'date':date_value(values['date']),'time':values['time'],'field':values['field'],
+        return {'activity':values['activity'],'date':date_value(values['date']),'time':values['time'],'field':values['field'],
             'start_mode':'scheduled' if values['start_mode']=='定时开始' else 'now',
             'start_at':date_value(values['start_date'])+'T'+values['start_hour']+':'+values['start_minute']+':00+08:00',
             'interval_seconds':int(values['interval_seconds']),
@@ -192,18 +217,34 @@ class PollerApp:
         try:
             data=read_config(SETTINGS_PATH)
             self.enabled.set(data.get('polling',{}).get('enabled',False))
+            activity=data.get('booking',{}).get('activity','健身房')
+            self.daily_activity.set(activity)
+            choices=list(DEFAULT_ACTIVITIES)
+            if activity not in choices: choices.append(activity)
+            self.daily_activity_choice.configure(values=choices)
+            self.time_picker.hour_choices=GYM_TIME_SLOTS if activity=='健身房' else ()
             self.time_picker.set(data.get('booking',{}).get('time_slots',[]))
             for section in ('polling','booking','mail'):
                 for key,value in data.get(section,{}).items():
                     if key in self.variables:
                         self.variables[key].set(str(value))
             candidate=data.get('waitlist',{})
+            activity=candidate.get('activity','健身房')
+            self.waitlist_vars['activity'].set(activity)
+            choices=list(DEFAULT_ACTIVITIES)
+            if activity not in choices: choices.append(activity)
+            self.waitlist_activity_choice.configure(values=choices)
+            self.waitlist_hours=GYM_TIME_SLOTS if activity=='健身房' else ()
             for key in ('time','field','interval_seconds'):
                 if key in candidate and (key!='time' or candidate[key]): self.waitlist_vars[key].set(str(candidate[key]))
             if candidate.get('date'):
                 self.waitlist_vars['date'].set(date_label(candidate['date']))
             from booking_flow import hourly_periods
-            try: hours=len(hourly_periods(candidate.get('time') or '18:00-19:00'))
+            try:
+                saved_hours=hourly_periods(candidate.get('time') or '18:00-19:00')
+                hours=len(saved_hours)
+                if activity!='健身房':
+                    self.waitlist_hours=saved_hours if candidate.get('time') else ()
             except BookingError: hours=1
             self.waitlist_vars['duration'].set('连续2小时' if hours==2 else '1小时')
             self.waitlist_vars['start_mode'].set('定时开始' if candidate.get('start_mode')=='scheduled' else '立即开始')
@@ -219,13 +260,16 @@ class PollerApp:
         self.waitlist_period_choices()
         self.update_waitlist_controls()
 
-    def update_date_preview(self):
+    def daily_schedule(self):
         try:
             minutes=int(self.variables['window_minutes'].get())
             if not 1<=minutes<=60: minutes=15
         except ValueError: minutes=15
+        return PollSettings(False,(),'',window_minutes=minutes)
+
+    def update_date_preview(self):
         current=beijing_now()
-        schedule=PollSettings(False,(),'',window_minutes=minutes)
+        schedule=self.daily_schedule()
         release=schedule.next_release(current)
         self.date_preview.set('自动预约开抢日的7天后\n下一次：'+date_label(schedule.target_date(release.date()))+'；'+release.strftime('%m月%d日 12:00')+'开始')
 
@@ -235,7 +279,7 @@ class PollerApp:
             data=read_config(SETTINGS_PATH)
             values={key:variable.get().strip() for key,variable in self.variables.items()}
             for section,keys in [('polling',('interval_seconds','window_minutes','max_checks','manual_timeout_seconds')),
-                    ('booking',('field',)),('mail',('smtp_host','port','security','username','sender','recipient'))]:
+                    ('booking',('activity','field')),('mail',('smtp_host','port','security','username','sender','recipient'))]:
                 for key in keys:
                     data.setdefault(section,{})[key]=int(values[key]) if key in ('interval_seconds','window_minutes','max_checks','manual_timeout_seconds','port') else values[key]
             # Preserve the exact authorization code; never pass it to a shell or log.
@@ -266,8 +310,13 @@ class PollerApp:
         settings={'cwd':ROOT,'stdin':subprocess.DEVNULL,'stdout':subprocess.PIPE,'stderr':subprocess.PIPE,'text':True,'encoding':'utf-8','errors':'replace'}
         if os.name=='nt': settings['creationflags']=subprocess.CREATE_NO_WINDOW
         try:
-            arguments=worker_command('booking' if command=='options' else 'poller',command)
-            if command=='options': arguments+=['--activity','健身房','--date',date_value(self.waitlist_vars['date'].get())]
+            arguments=worker_command('booking' if command in ('options','daily-options') else 'poller',
+                'options' if command=='daily-options' else command)
+            if command=='options': arguments+=['--activity',self.waitlist_vars['activity'].get(),'--date',date_value(self.waitlist_vars['date'].get())]
+            elif command=='daily-options':
+                schedule=self.daily_schedule()
+                target=schedule.target_date(schedule.next_release(beijing_now()).date())
+                arguments+=['--activity',self.daily_activity.get(),'--date',target]
             self.process=subprocess.Popen(arguments,**settings)
         except Exception:
             self.set_busy(False);self.status.set('程序未能启动，请检查程序文件或项目独立环境。');return
@@ -278,7 +327,25 @@ class PollerApp:
             self.events.put((command,process.returncode,output,error))
         threading.Thread(target=collect,daemon=True).start()
         self.status.set({'run':'每日任务已启动，等待12:00。','waitlist':'候补任务已启动，正在读取计划。',
-            'options':'正在同步网站日期和时段，不创建订单。'}.get(command,'正在处理邮件……'))
+            'options':'正在同步网站日期和时段，不创建订单。',
+            'daily-options':'正在同步所选项目和时段，不创建订单。'}.get(command,'正在处理邮件……'))
+
+    def change_daily_activity(self,event=None):
+        self.time_picker.set_hours(())
+        self.variables['field'].set('')
+        self.daily_options_hint.set('项目已更改，请同步网站时段，再添加候选。')
+
+    def sync_daily_options(self):
+        self.launch('daily-options')
+
+    def apply_daily_options(self,data):
+        if data.get('activity')!=self.daily_activity.get():
+            raise ValueError('同步返回的项目与当前选择不一致')
+        activities=data.get('activities') or list(DEFAULT_ACTIVITIES)
+        self.daily_activity_choice.configure(values=list(dict.fromkeys([*activities,self.daily_activity.get()])))
+        removed=self.time_picker.set_hours(data['time_slots'])
+        self.daily_options_hint.set('已同步'+self.daily_activity.get()+'的网站时段；七天后的余量会在12:00开抢时检查。'+
+            ('已移除不在当前时段表内的候选，请重新选择。' if removed else ''))
 
     def start_saved(self):
         try: load_settings(SETTINGS_PATH,require_enabled=True)
@@ -298,20 +365,27 @@ class PollerApp:
 
     def stop(self):
         atomic_json(STOP,{'requested_at':beijing_now().isoformat()})
-        self.status.set('已请求停止。正在核实的订单会先完成核实，邮件结果不明时不会自动重发。')
+        self.status.set('已请求停止预约轮询。正在核实的订单会先完成核实，已确认成功的通知仍由后台处理。')
 
     def show(self,text):
         self.text.configure(state='normal');self.text.delete('1.0','end');self.text.insert('1.0',text);self.text.configure(state='disabled')
 
     def apply_waitlist_options(self, data):
+        activity=self.waitlist_vars['activity'].get()
+        if data.get('activity',activity)!=activity:
+            raise ValueError('同步返回的项目与当前选择不一致')
+        if data.get('activities'):
+            self.waitlist_activity_choice.configure(values=list(dict.fromkeys([*data['activities'],activity])))
         dates=tuple(date_label(day) for day in data['dates'] if beijing_now().date().isoformat()<=day<=
             (beijing_now().date()+timedelta(days=7)).isoformat())
         if not dates: raise ValueError('没有开放日期')
         self.waitlist_date_choice.configure(values=dates)
-        if self.waitlist_vars['date'].get() not in dates: self.waitlist_vars['date'].set(dates[0])
+        if self.waitlist_vars['date'].get() not in dates:
+            selected=date_label(data['date']) if data.get('date') else dates[0]
+            self.waitlist_vars['date'].set(selected if selected in dates else dates[0])
         self.waitlist_hours=tuple(data['time_slots'])
         self.waitlist_period_choices()
-        self.waitlist_hint.set('已同步网站开放选项；余量仍会在候补时持续检查。')
+        self.waitlist_hint.set('已同步'+activity+'的网站开放选项；余量仍会在候补时持续检查。')
 
     def poll(self):
         self.update_date_preview()
@@ -320,26 +394,31 @@ class PollerApp:
                 state=json.loads(STATUS.read_text(encoding='utf-8'))
                 self.status.set(state['message'])
                 order=state.get('order') or state.get('last_order')
-                if order:
+                if state.get('result') and state['result'].get('phase')!='confirmed':
+                    self.show(state['message']+'\n\n'+failure_detail(state['result']))
+                elif order:
                     slot=order['slot']
                     mail_phase=state.get('mail_phase') or state.get('last_mail_phase','sending')
                     label={'queued':'待发送','connecting':'连接中','sending':'发送中','retryable':'等待有限重试',
-                        'sent':'邮件服务器已接受','failed':'发送失败','unknown':'结果不明，不自动重发','not_needed':'订单无需付款提醒'}.get(mail_phase,mail_phase)
+                        'sent':'邮件服务器已接受','failed':'发送失败，请检查配置后重试','unknown':'结果不明，按次数限制重试，可能重复','not_needed':'旧版本记录未发送通知'}.get(mail_phase,mail_phase)
                     self.show(f"最近一次确认的预约\n{slot['venue_name']} · {slot['activity']}\n{slot['date']} {slot['time']}\n{slot['field']} · {order['amount_due']}元\n订单号：{order['order_id']}\n邮件状态：{label}\n\n请在体育平台个人订单核对并付款。")
                 elif state.get('settings'):
                     setting=state['settings']
                     details=(f"持续候补至：{setting['expires_at']}；成功后停止。" if setting.get('mode')=='waitlist' else
                         f"最多{setting['max_checks']}次；窗口{setting['window_minutes']}分钟。")
-                    self.show(f"开始时间：{setting['release_at']}\n预约日期：{setting['target_date']}\n目标时段：{', '.join(setting['time_slots'])}\n间隔：{setting['interval_seconds']}秒\n{details}")
+                    self.show(f"预约项目：{setting.get('activity','健身房')}\n开始时间：{setting['release_at']}\n预约日期：{setting['target_date']}\n目标时段：{', '.join(setting['time_slots'])}\n间隔：{setting['interval_seconds']}秒\n{details}")
             except (OSError,ValueError,KeyError): pass
         try: command,code,output,error=self.events.get_nowait()
         except queue.Empty: pass
         else:
             self.process=None;self.set_busy(False)
             self.running_command=None
-            if command=='options' and code==0:
+            if command in ('options','daily-options') and code==0:
                 try:
-                    self.apply_waitlist_options(json.loads(output));self.status.set('候补日期和时段已同步。')
+                    if command=='daily-options':
+                        self.apply_daily_options(json.loads(output));self.status.set('每日预约的项目和时段已同步。')
+                    else:
+                        self.apply_waitlist_options(json.loads(output));self.status.set('候补日期和时段已同步。')
                 except (ValueError,KeyError,TypeError): self.status.set('网站选项未能读取，请重新登录或稍后同步。')
             elif command not in ('run','waitlist') or code:
                 self.status.set(output.strip() or error.strip() or '任务已停止，请检查配置和本地记录。')

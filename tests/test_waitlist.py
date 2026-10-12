@@ -47,6 +47,7 @@ class WaitlistRunnerTests(unittest.TestCase):
     def setUp(self):
         self.temporary=tempfile.TemporaryDirectory();self.addCleanup(self.temporary.cleanup)
         self.root=Path(self.temporary.name);self.clock=Clock();self.event=threading.Event()
+        stop_path=patch.object(runner,'STOP',self.root/'stop.json');stop_path.start();self.addCleanup(stop_path.stop)
         self.store=runner.WaitlistStore(self.root/'waitlist.json')
         self.journal=booking.Journal(self.root/'journal.json');self.notified=[];self.phases=[]
 

@@ -11,6 +11,8 @@ from session import ROOT
 from configuration import CONFIG_PATH, read_config, ConfigError
 
 BEIJING = timezone(timedelta(hours=8), 'Asia/Shanghai')
+MAX_DAILY_WINDOW_MINUTES = 24 * 60
+MAX_WAITLIST_DURATION_MINUTES = 8 * 24 * 60
 SETTINGS_PATH = CONFIG_PATH
 
 
@@ -29,10 +31,28 @@ def integer(values, key, default, minimum, maximum):
     return result
 
 
+def parse_stop_at(value):
+    if not isinstance(value, str) or not value.strip():
+        raise SettingsError('请选择截止日期和时间。')
+    try:
+        moment = datetime.fromisoformat(value)
+        if moment.tzinfo is None: moment = moment.replace(tzinfo=BEIJING)
+        return moment.astimezone(BEIJING)
+    except (ValueError, OverflowError):
+        raise SettingsError('截止日期和时间格式错误。') from None
+
+
 def address(value):
     if not isinstance(value, str) or len(value) > 254 or not re.fullmatch(r'[A-Za-z0-9.!#$%&\'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?', value):
         raise SettingsError('请填写完整的发件人与收件人邮箱，不填写显示名称。')
     return value
+
+
+def activity_name(values):
+    activity = values.get('activity', '健身房')
+    if not isinstance(activity, str) or not activity.strip() or len(activity) > 80 or any(ord(c) < 32 for c in activity):
+        raise SettingsError('请从项目选项中选择预约项目。')
+    return activity.strip()
 
 
 @dataclass(frozen=True)
@@ -84,6 +104,9 @@ class PollSettings:
     window_minutes: int = 15
     max_checks: int = 15
     manual_timeout_seconds: int = 300
+    activity: str = '健身房'
+    stop_mode: str = 'duration'
+    stop_at: str = ''
 
     @classmethod
     def read(cls, config):
@@ -103,14 +126,35 @@ class PollSettings:
         field_name = booking.get('field', '')
         if not isinstance(field_name, str) or len(field_name) > 80 or any(ord(c) < 32 for c in field_name):
             raise SettingsError('场地名称格式错误。')
+        activity = activity_name(booking)
+        stop_mode = values.get('stop_mode', 'duration')
+        stop_at = values.get('stop_at', '')
+        if stop_mode not in ('duration', 'deadline'):
+            raise SettingsError('每日停止条件须为持续时长或指定截止时间。')
+        if stop_mode == 'deadline': parse_stop_at(stop_at)
+        elif not isinstance(stop_at, str): raise SettingsError('截止时间格式错误。')
         return cls(enabled, tuple(slots), field_name,
             integer(values, 'interval_seconds', 60, 20, 600),
-            integer(values, 'window_minutes', 15, 1, 60),
-            integer(values, 'max_checks', 15, 1, 60),
-            integer(values, 'manual_timeout_seconds', 300, 0, 300))
+            integer(values, 'window_minutes', 15, 1, MAX_DAILY_WINDOW_MINUTES),
+            integer(values, 'max_checks', 15, 0, 4320),
+            integer(values, 'manual_timeout_seconds', 300, 0, 300), activity=activity,
+            stop_mode=stop_mode, stop_at=stop_at)
+
+    def deadline(self):
+        return parse_stop_at(self.stop_at) if self.stop_mode == 'deadline' else None
+
+    def validate_start(self, current=None):
+        current = (current or beijing_now()).astimezone(BEIJING)
+        deadline = self.deadline()
+        if deadline is not None and deadline <= max(current, self.next_release(current)):
+            raise SettingsError('截止时间须晚于当前时间和下一次开抢时间。')
 
     def window(self, day):
         start = datetime.combine(day, time(12), BEIJING)
+        if self.stop_mode == 'deadline':
+            # Each day owns its target until the next noon; the absolute deadline
+            # also prevents the scheduler from starting any later daily round.
+            return start, min(self.deadline(), start + timedelta(days=1))
         return start, start + timedelta(minutes=self.window_minutes)
 
     def target_date(self, day):
@@ -125,10 +169,12 @@ class PollSettings:
         current = current or beijing_now()
         release = self.next_release(current)
         return {'enabled': self.enabled, 'timezone': 'Asia/Shanghai', 'release_at': release.isoformat(),
+            'activity': self.activity,
             'target_date': self.target_date(release.date()), 'time_slots': list(self.time_slots),
             'field': self.field or '任一符合条件的场地',
             'interval_seconds': self.interval_seconds, 'window_minutes': self.window_minutes,
-            'max_checks': self.max_checks}
+            'max_checks': self.max_checks, 'stop_mode': self.stop_mode,
+            'stop_at': self.window(release.date())[1].isoformat()}
 
 
 def load_settings(path=SETTINGS_PATH, require_enabled=False, require_mail=True):
@@ -160,6 +206,10 @@ class WaitlistSettings:
     start_at: str = ''
     interval_seconds: int = 60
     manual_timeout_seconds: int = 300
+    activity: str = '健身房'
+    stop_mode: str = 'slot'
+    duration_minutes: int = 60
+    stop_at: str = ''
 
     @property
     def time_slots(self):
@@ -182,15 +232,23 @@ class WaitlistSettings:
         mode, start_at = values.get('start_mode', 'now'), values.get('start_at', '')
         if mode not in ('now', 'scheduled') or not isinstance(start_at, str):
             raise SettingsError('候补启动方式须为立即开始或定时开始。')
+        stop_mode, stop_at = values.get('stop_mode', 'slot'), values.get('stop_at', '')
+        if stop_mode not in ('slot', 'duration', 'deadline'):
+            raise SettingsError('候补停止条件须为目标时段开始、持续时长或指定截止时间。')
+        if stop_mode == 'deadline': parse_stop_at(stop_at)
+        elif not isinstance(stop_at, str): raise SettingsError('截止时间格式错误。')
         result = cls(target, period, field_name, mode, start_at,
             integer(values, 'interval_seconds', 60, 20, 600),
-            integer(values, 'manual_timeout_seconds', 300, 0, 300))
+            integer(values, 'manual_timeout_seconds', 300, 0, 300), activity=activity_name(values),
+            stop_mode=stop_mode,
+            duration_minutes=integer(values, 'duration_minutes', 60, 1, MAX_WAITLIST_DURATION_MINUTES),
+            stop_at=stop_at)
         if mode == 'scheduled':
             try: result.start_time()
             except ValueError:
                 raise SettingsError('请从选项中选择候补开始日期和时间。') from None
-            if result.start_time() >= result.expires_at():
-                raise SettingsError('候补开始时间必须早于目标时段开始时间。')
+            if result.start_time() >= result.end_time(result.start_time()):
+                raise SettingsError('候补开始时间必须早于截止时间和目标时段开始时间。')
         return result
 
     def start_time(self, current=None):
@@ -203,6 +261,14 @@ class WaitlistSettings:
         # Both hours must still be bookable; stop when the first hour starts.
         return datetime.combine(date.fromisoformat(self.date), time.fromisoformat(self.period[:5]), BEIJING)
 
+    def end_time(self, started_at):
+        end = self.expires_at()
+        if self.stop_mode == 'duration':
+            end = min(end, started_at.astimezone(BEIJING) + timedelta(minutes=self.duration_minutes))
+        elif self.stop_mode == 'deadline':
+            end = min(end, parse_stop_at(self.stop_at))
+        return end
+
     def validate_start(self, current=None):
         current = (current or beijing_now()).astimezone(BEIJING)
         target = date.fromisoformat(self.date)
@@ -210,12 +276,17 @@ class WaitlistSettings:
             raise SettingsError('候补日期须选择今天至七天后的日期。')
         if current >= self.expires_at():
             raise SettingsError('目标时段已经开始，不能继续候补。')
+        if current >= self.end_time(self.start_time(current)):
+            raise SettingsError('设定的截止时间已经到达，不能启动候补。')
 
     def public(self, current=None):
         return {'mode': 'waitlist', 'timezone': 'Asia/Shanghai',
+            'activity': self.activity,
             'release_at': self.start_time(current).isoformat(), 'expires_at': self.expires_at().isoformat(),
             'target_date': self.date, 'time_slots': list(self.time_slots),
-            'field': self.field or '任一符合条件的场地', 'interval_seconds': self.interval_seconds}
+            'field': self.field or '任一符合条件的场地', 'interval_seconds': self.interval_seconds,
+            'stop_mode': self.stop_mode, 'duration_minutes': self.duration_minutes,
+            'stop_at': self.end_time(self.start_time(current)).isoformat()}
 
 
 def load_waitlist_settings(path=SETTINGS_PATH):

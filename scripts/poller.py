@@ -10,16 +10,17 @@ if __name__=='__main__': ensure_venv()
 
 from booking_flow import BookingBrowser, BookingError, ProcessLock
 from login_flow import atomic_json, load_config
-from mail_notice import MailFailure, send_test_mail, service_outbox
+from mail_notice import MailFailure, send_test_mail, service_outbox, recover_confirmed_notices
 from poll_runner import run_daily, run_waitlist, STOP, select_slot
-from poll_settings import SETTINGS_PATH, beijing_now, load_settings, load_mail_settings, load_waitlist_settings
+from poll_settings import SETTINGS_PATH, beijing_now, load_settings, load_mail_settings, load_waitlist_settings, SettingsError
 from session import ROOT
+from browser_runtime import BrowserError
 
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--settings',type=Path,default=SETTINGS_PATH)
-    parser.add_argument('command',choices=('check','run','waitlist','check-waitlist','stop','dry-run','test-mail','retry-mail'))
+    parser.add_argument('command',choices=('check','run','waitlist','check-waitlist','stop','dry-run','test-mail','retry-mail','service-mail'))
     parser.add_argument('--time',help='Override a time slot only for read-only dry-run.')
     options=parser.parse_args(argv)
     if options.command=='stop':
@@ -33,13 +34,20 @@ def main(argv=None):
             print(json.dumps({**settings.public(),'mail_configured':True},ensure_ascii=False,indent=2))
         else: run_waitlist(options.settings)
         return 0
-    if options.command in ('test-mail','retry-mail'):
+    if options.command in ('service-mail','retry-mail'):
+        try:
+            mail=load_mail_settings(options.settings)
+        except SettingsError:
+            count=recover_confirmed_notices()
+            print(json.dumps({'not_configured':True,'retained':count},ensure_ascii=False))
+            return 0
+        recover_confirmed_notices(mail)
+        print(json.dumps(service_outbox(mail,retry_failed=options.command=='retry-mail'),ensure_ascii=False))
+        return 0
+    if options.command=='test-mail':
         mail=load_mail_settings(options.settings)
-        if options.command=='test-mail':
-            send_test_mail(mail)
-            print('测试邮件已由SMTP服务器接受，请检查收件箱。')
-        else:
-            print(json.dumps(service_outbox(mail),ensure_ascii=False))
+        send_test_mail(mail)
+        print('测试邮件已由SMTP服务器接受，请检查收件箱。')
         return 0
     if options.command=='dry-run' and options.time:
         from poll_settings import PollSettings
@@ -55,15 +63,16 @@ def main(argv=None):
     elif options.command=='run':
         run_daily(options.settings)
     elif options.command=='dry-run':
-        from playwright.sync_api import sync_playwright
+        from playwright_runtime import sync_playwright
         with ProcessLock(ROOT/'.local/booking/run.lock'),sync_playwright() as pw:
             browser=BookingBrowser(load_config(options.settings))
             try:
                 browser.start(pw,headless=True,load_appointment=False)
                 target=settings.target_date(beijing_now().date())
-                snapshot=browser.refresh_grid('健身房',target)
+                snapshot=browser.refresh_grid(settings.activity,target)
                 slot=select_slot(snapshot,settings)
                 result={'read_only':True,'real_order_created':False,'email_sent':False,
+                    'activity':settings.activity,
                     'target_date':target,'time_slots':list(settings.time_slots),
                     'date_visible':snapshot is not None,'available':slot is not None,'selected_slot':None if slot is None else {
                         'field':slot.field,'time':slot.time,'price':slot.price},'network':browser.gate.events}
@@ -77,7 +86,7 @@ if __name__=='__main__':
     if sys.stdout: sys.stdout.reconfigure(encoding='utf-8')
     if sys.stderr: sys.stderr.reconfigure(encoding='utf-8')
     try: sys.exit(main())
-    except BookingError as error:
+    except (BookingError,BrowserError) as error:
         print(str(error),file=sys.stderr);sys.exit(2)
     except MailFailure as error:
         print('邮件发送失败或结果不明，请检查本地邮箱配置；没有输出授权码。',file=sys.stderr);sys.exit(2)

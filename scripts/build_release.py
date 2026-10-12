@@ -16,6 +16,7 @@ from check_release import check_release, secret_variants
 from configuration import read_config
 from runtime import ROOT
 from version import VERSION
+from browser_runtime import detect_browsers
 
 
 def distribution_issues(directory, secrets=()):
@@ -38,6 +39,11 @@ def command(arguments,directory,timeout=300):
              'encoding':'utf-8','errors':'replace','timeout':timeout}
     if os.name=='nt': options['creationflags']=subprocess.CREATE_NO_WINDOW
     return subprocess.run([str(arg) for arg in arguments],**options)
+
+
+def has_shutdown_error(result):
+    return any(marker in result.stderr for marker in (
+        'Task was destroyed', 'Future exception was never retrieved', 'TargetClosedError'))
 
 
 def dependency_notices(destination):
@@ -93,8 +99,19 @@ def build(skip_tests=False):
     checked=command([program/'SJTUFitMan-worker.exe','--worker','self-check'],program)
     (work/'smoke-worker.log').write_text(checked.stdout+checked.stderr,encoding='utf-8')
     if checked.returncode: raise RuntimeError(f'发布版自检失败，日志位于{work.relative_to(ROOT)}/smoke-worker.log。')
+    if has_shutdown_error(checked): raise RuntimeError('发布版浏览器驱动未完整退出，请查看打包日志。')
     report=json.loads(checked.stdout.strip().splitlines()[-1])
     if not report.get('frozen'): raise RuntimeError('自检未使用内置运行环境。')
+    report['browser_launch_checks']={}
+    for kind in detect_browsers():
+        launched=command([program/'SJTUFitMan-worker.exe','--worker','self-check','--browser',kind],program)
+        (work/('smoke-browser-'+kind+'.log')).write_text(launched.stdout+launched.stderr,encoding='utf-8')
+        if launched.returncode: raise RuntimeError('发布版浏览器启动检查未通过，请查看打包日志。')
+        if has_shutdown_error(launched): raise RuntimeError('发布版浏览器未完整退出，请查看打包日志。')
+        launch_report=json.loads(launched.stdout.strip().splitlines()[-1])
+        if not launch_report.get('frozen') or launch_report.get('browser_check',{}).get('kind')!=kind:
+            raise RuntimeError('发布版未使用指定浏览器，已停止打包。')
+        report['browser_launch_checks'][kind]=launch_report['browser_check']
     for module in ('booking','poller'):
         help_result=command([program/'SJTUFitMan-worker.exe','--worker',module,'--help'],program)
         if help_result.returncode or not help_result.stdout: raise RuntimeError('发布版后台模块未能启动。')

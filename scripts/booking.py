@@ -9,13 +9,15 @@ from runtime import ensure_venv
 if __name__=='__main__':
     ensure_venv()
 
-from playwright.sync_api import sync_playwright
+from playwright_runtime import sync_playwright
 from booking_flow import BookingBrowser, BookingError, Journal, ProcessLock, Slot, candidates, confirmation_hash, hourly_periods
 from login_flow import FlowError, atomic_json
 from session import ROOT, load_config
 from booking_options import website_options
-from poll_settings import beijing_now
+from poll_settings import beijing_now, load_mail_settings, SettingsError
 from configuration import CONFIG_PATH
+from mail_notice import notify_payment
+from browser_runtime import BrowserError
 
 PRIVATE = ROOT / '.local/booking'
 
@@ -53,7 +55,26 @@ def parser():
         help='Exact confirmation_sha256 printed by prepare; confirms this reservation and its terms.')
     submit.add_argument('--headed', action='store_true')
     submit.add_argument('--manual-timeout',type=int,default=300)
-    commands.add_parser('reconcile', help='Read-only verification of an interrupted previous submission.')
+    commands.add_parser('reconcile', help='Verify previous orders without submitting; remind for confirmed unpaid orders.')
+    return result
+
+
+def save_result(result, output_path, account, config_path):
+    # Reservation success is durable before any configuration or SMTP operation.
+    atomic_json(output_path, result)
+    if (result.get('phase') == 'confirmed' and result.get('simulated') is False
+            and result.get('real_order_created') is True):
+        try:
+            try:
+                settings = load_mail_settings(config_path)
+            except SettingsError:
+                settings = None
+            phase = notify_payment(account, result, settings)
+        except Exception:
+            # A mail failure must never turn a successful booking into a failed booking.
+            phase = 'failed'
+        result['mail_phase'] = phase
+        atomic_json(output_path, result)
     return result
 
 
@@ -75,13 +96,34 @@ def reconcile(browser, journal):
                 continue
         if len(matches) == 1:
             order = {'phase': 'confirmed', 'slot': asdict(slot), **matches[0],
-                'simulated': False, 'real_order_created': True}
+                'simulated': False, 'real_order_created': True, 'confirmed_at': beijing_now().isoformat()}
             journal.update(entry, 'confirmed', order_id=matches[0]['order_id'], order=order)
             results.append(order)
         else:
             # Absence from a finite recent-order page never proves that submission failed.
             results.append({'phase': 'unknown', 'matches': len(matches),
                 'message': '未能唯一确认订单，继续禁止再次提交。请手动检查个人订单。'})
+    if not results:
+        # Also allow a missed single-booking reminder to be recovered safely. Verify
+        # the latest confirmed order on the server before using its payment state.
+        latest = next((entry for entry in reversed(journal.entries)
+            if entry['account'] == browser.account and entry['phase'] == 'confirmed'
+            and entry.get('order', {}).get('order_id')), None)
+        if latest is not None:
+            slot = Slot(**latest['slot'])
+            identifier = latest['order']['order_id']
+            from booking_flow import validate_order
+            try:
+                verified = validate_order(slot, browser.query_order(identifier))
+            except BookingError:
+                results.append({'phase': 'attention',
+                    'message': '上次订单当前无法确认为待付款或已支付，未发送提醒。请在体育平台个人订单查看是否已过期或取消。'})
+            else:
+                order = {'phase': 'confirmed', 'slot': asdict(slot), 'order_id': identifier,
+                    **verified, 'simulated': False, 'real_order_created': True,
+                    'confirmed_at': beijing_now().isoformat()}
+                journal.update(latest, 'confirmed', order=order)
+                results.append(order)
     return {'reconciliation': results, 'read_only': True}
 
 
@@ -104,7 +146,11 @@ def main(argv=None):
             except FlowError:
                 raise BookingError('登录会话已失效。请在“交大健身房助手”的“登录与会话”页重新登录并保存会话，再同步网站选项或预约。') from None
             if options.command == 'reconcile':
-                print(json.dumps(reconcile(browser, Journal(PRIVATE / 'journal.json')), ensure_ascii=False, indent=2))
+                result = reconcile(browser, Journal(PRIVATE / 'journal.json'))
+                for order in result['reconciliation']:
+                    if order.get('phase') == 'confirmed':
+                        save_result(order, PRIVATE / 'last-order.json', browser.account, options.config)
+                print(json.dumps(result, ensure_ascii=False, indent=2))
                 return 0
             if options.command == 'options':
                 snapshot = browser.activity_grid(options.activity)
@@ -158,7 +204,7 @@ def main(argv=None):
                     else:
                         result = browser.commit(slot, prepared)
                         output_path = PRIVATE / ('simulation.json' if options.scenario == 'success' else 'simulation-' + options.scenario + '.json')
-            atomic_json(output_path, result)
+            save_result(result, output_path, browser.account, options.config)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             print('本地结果：' + str(output_path))
             if result.get('phase') == 'confirmed':
@@ -173,7 +219,7 @@ if __name__ == '__main__':
     sys.stderr.reconfigure(encoding='utf-8')
     try:
         sys.exit(main())
-    except BookingError as error:
+    except (BookingError, BrowserError) as error:
         print(str(error), file=sys.stderr)
         sys.exit(2)
     except (Exception, KeyboardInterrupt) as error:

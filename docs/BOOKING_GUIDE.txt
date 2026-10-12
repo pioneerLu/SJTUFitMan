@@ -1,87 +1,33 @@
-交大体育预约助手（统一配置版）
+预约执行模块说明 · 自动预约版
 
-启动
-  双击项目根目录唯一入口“交大健身房助手.pyw”，选择“单次预约”。自动使用本项目 .venv。
-  完整依赖版本固定在 requirements.txt；当前独立环境已安装。
-  新机器运行 pwsh -File scripts/setup_env.ps1，并安装Chrome。
-  如果会话失效，在同一窗口切换“登录与会话”，重新登录并保存会话。
+普通用户
+  主界面只有“自动预约、记录、设置”，不再提供单次预约或台球模拟按钮。
+  手动单次预约直接使用学校体育平台；自动预约操作见START_GUIDE.txt及POLLING_GUIDE.txt。
+  下单、须知校验、连续两小时校验和验证码处理都由自动预约执行模块共用。
+  抢到后生成成功通知，付款由用户在体育平台完成。
 
-本次已验证
-  2026-10-10 使用已保存会话在真实网站查询台球余量。
-  选择 2026-10-11 12:00-13:00 八球台6，8元。
-  打开预订须知，核对场地、时段、数量、费用。
-  模拟时最终 ConfirmOrder 请求不会送达学校服务器。
-  向真实前端返回模拟成功响应，进入网站的待付款订单详情页。
-  订单详情读请求同样返回模拟数据；核对日期、场地、时段与应付金额。
-  页面显示“请在15分钟内完成支付”。没有占用真实场地，没有发起付款。
-  成功、额外验证码、服务器拒绝、结果不明四种模拟分支均已在真实前端验证。
-  新增本地验证码处理、校验权限和有限重试的测试，详见 CAPTCHA_REPORT.txt。
-  模拟成功不能证明学校服务器会接受真实订单；资格、频次等仍由学校判断。
+执行逻辑
+  booking_flow.py统一处理网站结构、场地与时段选择、须知和订单校验。
+  登录图片使用本地ddddocr，预约滑块使用本地OpenCV，失败时转手动。
+  不依赖LLM。网站原前端负责生成下单参数，程序通过已观察到的控件提交。
+  两小时要求同一场地的两个小时同时可用，数量、金额与订单总计逐项校验。
+  服务器订单和页面状态一致才标记成功。
+  Journal先保存提交意图，成功记录落盘后才发邮件。
+  提交结果不明时禁止重复下单，记录页提供已有订单的只读核查。
+  已核实成功的订单不因邮件失败或重启而重复创建。
+  不调用付款、退款、取消订单或修改个人资料的接口。
 
-窗口按钮
-  项目、日期、时段使用下拉选项；日期显示年月日和星期，不需要输入格式。
-  预约时长可选“1小时”或“连续2小时”，两小时示例为18:00-20:00。
-  连续两小时选择同一场地的两个小时，合为一张订单。
-  同步网站选项：读取当前项目实际开放的日期和时段，不创建订单。
-    若原来选择的日期尚未开放，选择网站最新的开放日期。
-    启动时的本地日期选项不能说明已开放，请先同步。
-    时段选项也包含满额时段，具体余量通过“检查预约余量”确认。
-    更换项目后需重新同步；修改选择后需重新查看预订须知。
-  检查预约余量：按选中的项目、日期、时段及场地查询。
-  运行台球模拟：自动选择明天12:00-13:00的台球场地，拦截下单。
-  查看预订须知：选中一个符合条件的场地，自动打开预约确认窗口。
-  确认真实预约：自动准备当前选择并打开须知窗口；已有准备结果时直接打开。
-    须知正文可滚动，底部勾选框和“创建此次真实订单”按钮固定显示。
-    核对预约、阅读须知并勾选同意后，点击“创建此次真实订单”提交一次。
-    “暂不提交”关闭须知窗口，尚不会创建订单。
-    网站要求滑块时，OpenCV在本机定位，通过原控件拖动并等候服务器校验。
-    仅在服务器验证通过后，允许原网页继续一次下单；不会无限重试。
-    自动定位失败或网站拒绝时，保留Chrome窗口，最多等待5分钟供手动处理。
-    5分钟后停止；结果不明时需先核查个人订单。
-  核查上次订单：只读取服务器订单，核对之前结果不明的本地记录。
+开发者工具
+  booking.py保留只读选项、核查和模拟命令用于维护执行模块。
+  booking options读取日期和时段，供自动预约表单刷新。
+  booking reconcile核查已有提交，不重新下单。
+  台球模拟拦截最终ConfirmOrder请求，模拟成功不能证明学校服务器接受真实订单。
+  命令仅供维护测试，不在普通用户界面作为独立预约功能展示。
+  验证码历史测试过程见CAPTCHA_REPORT.txt。
 
-固定逻辑
-  预约执行只使用 Python、Playwright、Chrome 以及明确的页面和响应规则。
-  登录图片使用本地ddddocr，预约滑块使用本地OpenCV。
-  不调用LLM、Vision API或商业验证码识别服务。
-  网站自带前端负责生成下单加密参数；程序点击已观察到的固定控件。
-  单次选择一个场地的1小时或连续2小时，提交前逐项核对时间、金额和订单合计。
-  连续两小时任何一小时不可选时不提交，不自动只预订其中一小时。
-  下单成功不能只看提示文字：还需核对服务器订单详情与页面状态。
-  会话失效、字段缺失或页面结构变化时停止；滑块失败转手动。
-  下单结果不明时不重试；先保存本地记录，再允许请求发送。
-  启动时取得系统文件锁，防止同时运行两个预约任务。
-  同一账号存在未核实提交时，禁止继续真实下单；已确认目标禁止重复创建。
-  不进入付款接口，不修改个人资料，不取消已有订单。
-
-本地文件
-  config/config.toml：账号、会话路径、预约计划和邮件配置。
-  .local/auth/：保存的登录会话。
-  .local/booking/prepared.json：当前待确认的具体预约和须知。
-  .local/booking/options.json：最近同步的日期和时段，不包含签名日期参数或账号资料。
-  .local/booking/simulation.json、simulation-order.png：模拟结果和页面截图。
-  .local/booking/journal.json：真实提交的持久记录。
-  .local/booking/last-order.json：最近一次真实订单结果。
-  .local/booking/failure.json：异常类型和本地代码位置，不含原始异常文本。
-  .local/captcha/slider-benchmark.json：10个真实滑块的校验结果。
-  .local/captcha/last-slider.json、manual-status.json：自动识别结果和手动接管状态。
-  .local/booking/simulation-manual.json：用户完成手动滑块后的模拟预约结果。
-  .local/ 和个人config/config.toml均不会被版本控制跟踪。
-  不要复制、清空 journal.json 来绕过重复下单保护；结果不明先核查个人订单。
-
-命令入口（可选）
-  .venv\Scripts\python.exe scripts/booking.py simulate
-  .venv\Scripts\python.exe scripts/booking.py simulate --scenario verification
-  .venv\Scripts\python.exe scripts/booking.py simulate --scenario verification --manual-verification --headed
-  .venv\Scripts\python.exe scripts/booking.py inspect --activity 健身房 --date 2026-10-17 --time 18:00-19:00
-  .venv\Scripts\python.exe scripts/booking.py prepare --activity 台球 --date 2026-10-11 --time 12:00-13:00
-  .venv\Scripts\python.exe scripts/booking.py submit --confirm-reservation-sha256 <prepare展示的confirmation_sha256完整值>
-  .venv\Scripts\python.exe scripts/booking.py reconcile
-  .venv\Scripts\python.exe scripts/benchmark_captcha.py slider --samples 10 --interval 20
-  滑块实测真实调用验证码接口，但不会发送真实下单请求。
-
-当前范围
-  已封装单次查询、准备、模拟、真实提交入口与中断核查。
-  真实提交入口尚未在学校服务器完成实际下单验证。
-  在同一窗口选择“每日开抢”“退选候补”或“邮件设置”，详见POLLING_GUIDE.txt。
-  本地填写config/config.toml、启用并启动后运行；不需要每次让LLM判断页面。
+配置和记录
+  config/config.toml统一保存个人账号、邮箱和两种自动计划。
+  .local/auth保存会话；.local/booking/journal.json保存提交与成功记录。
+  .local/mail/outbox.json保存通知状态和去重标识。
+  私人配置和.local均被Git排除，原始发布包只带空白样例。
+  升级保留原config/config.toml和.local，旧版成功记录继续参与邮件补发。

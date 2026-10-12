@@ -9,9 +9,11 @@ import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 from runtime import ROOT, worker_command
-from booking_options import GYM_TIME_SLOTS, date_label, date_value, local_dates, period_choices
+from booking_options import DEFAULT_ACTIVITIES, GYM_TIME_SLOTS, date_label, date_value, local_dates, period_choices
 from poll_settings import beijing_now
 from configuration import CONFIG_PATH
+from booking_feedback import failure_detail
+from mail_notice import payment_notice_status
 
 
 
@@ -51,7 +53,7 @@ class BookingApp:
         for index, (label, variable) in enumerate(entries):
             ttk.Label(form, text=label).grid(row=index, column=0, sticky='w', padx=(0, 20), pady=5)
             if label == '项目':
-                widget = ttk.Combobox(form, textvariable=variable, values=('健身房','台球','舞蹈','排练厅','钢琴','交谊厅'), state='readonly')
+                widget = self.activity_choice = ttk.Combobox(form, textvariable=variable, values=DEFAULT_ACTIVITIES, state='readonly')
                 widget.bind('<<ComboboxSelected>>', self.change_activity)
             elif label == '日期':
                 widget = self.date_choice = ttk.Combobox(form, textvariable=variable, values=dates, state='readonly')
@@ -93,7 +95,7 @@ class BookingApp:
         self.text.configure(yscrollcommand=scroll.set)
         scroll.pack(side='right', fill='y')
         self.text.pack(side='left', fill='both', expand=True)
-        self.show('台球模拟会自动选取明天 12:00–13:00的可选场地。最终下单请求被拦截，不占用真实场地。\n\n真实预约先查看须知并确认。滑块会在本机自动处理，失败时保留Chrome窗口，最多等待5分钟供你手动完成。程序只创建订单，不操作付款。\n\n在统一助手中切换“登录与会话”可重新登录；“每日开抢”和“退选候补”可启动轮询，两种任务共用邮件配置。')
+        self.show('台球模拟会自动选取明天 12:00–13:00的可选场地。最终下单请求被拦截，不占用真实场地。\n\n真实预约先查看须知并确认。滑块会在本机自动处理，失败时保留浏览器窗口，最多等待5分钟供你手动完成。程序只创建订单，不操作付款。\n\n单次预约、每日开抢和退选候补共用邮件配置；核实抢到后，无论待付款还是已支付都会发送成功通知。临时失败会在软件运行期间后台重试；已有成功记录重启后也会补发。')
         if not self.embedded: window.protocol('WM_DELETE_WINDOW', self.close)
         self.timer = window.after(200, self.poll)
 
@@ -144,6 +146,8 @@ class BookingApp:
         if data.get('activity') != self.activity.get():
             return
         self.change_selection()
+        if data.get('activities'):
+            self.activity_choice.configure(values=data['activities'])
         dates = tuple(date_label(value) for value in data['dates'])
         self.date_choice.configure(values=dates)
         self.day.set(date_label(data['date']))
@@ -221,7 +225,8 @@ class BookingApp:
         elif mode == 'reconcile':
             results = data['reconciliation']
             self.status.set('订单核查完成。')
-            self.show('\n\n'.join(x.get('message') or (self.description(x['slot']) + '\n订单状态：' + x['status']) for x in results) or '没有待核实的本地提交记录。')
+            self.show('\n\n'.join(x.get('message') or (self.description(x['slot']) + '\n订单状态：' + x['status']
+                + '\n邮件状态：' + payment_notice_status(x.get('mail_phase'))) for x in results) or '没有待核实的本地提交记录。')
         else:
             status = {'confirmed': '已确认待付款订单', 'unknown': '结果不明，请核查个人订单',
                 'verification_required': '网站要求额外验证码，请手动处理', 'rejected': '网站拒绝本次下单',
@@ -231,12 +236,19 @@ class BookingApp:
                 label = '已确认订单（已支付）'
             self.status.set(('模拟：' if data.get('simulated') else '') + label)
             text = self.description(data['slot']) + '\n\n' + label
+            detail = failure_detail(data)
+            if data['phase'] != 'confirmed' and detail:
+                text += '\n\n' + detail
             if data.get('order_id'):
                 text += '\n订单号：' + data['order_id']
             if data.get('simulated'):
                 text += '\n\n这是拦截下单请求后的模拟结果，没有真实订单。'
             elif data['phase'] == 'confirmed' and data.get('status') == '待付款':
                 text += '\n\n请尽快在交大体育平台的“个人订单”付款。网站提示15分钟内付款。'
+            if data['phase'] == 'confirmed' and not data.get('simulated'):
+                notice = payment_notice_status(data.get('mail_phase'))
+                text += '\n\n邮件状态：' + notice
+                self.status.set(label + '；' + notice)
             self.show(text)
 
     @staticmethod

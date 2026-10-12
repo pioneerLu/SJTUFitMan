@@ -4,7 +4,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from runtime import ensure_venv
 if __name__=='__main__': ensure_venv()
-from playwright.sync_api import sync_playwright
+from playwright_runtime import sync_playwright
 from booking_flow import BookingBrowser, BookingError, ProcessLock
 from login_flow import FlowError, LoginBrowser, atomic_json, load_config
 from configuration import CONFIG_PATH

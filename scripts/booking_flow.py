@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 from login_flow import FlowError, LoginBrowser, atomic_json, user_fingerprint
 from session import HOST, ORIGIN, ROOT
 from runtime import asset_path
+from booking_feedback import confirm_feedback, identity_redactions
 
 SCRIPTS = asset_path('scripts')
 SNAPSHOT = (SCRIPTS / 'appointment_snapshot.js').read_text(encoding='utf-8')
@@ -448,12 +449,16 @@ class BookingBrowser:
         self.manual_timeout = manual_timeout
         self.headless = True
         self.slider_auto = True
+        self.feedback_redactions = identity_redactions(config)
 
     def start(self, playwright, headless=True, load_appointment=True):
         self.headless = headless
-        self.login.browser = playwright.chromium.launch(channel='chrome', headless=headless)
+        self.login.launch(playwright, headless=headless)
         self.login.context = self.login.new_context(restore=True)
-        self.account = user_fingerprint(self.login.current_user())
+        user = self.login.current_user()
+        self.account = user_fingerprint(user)
+        self.feedback_redactions.extend(identity_redactions(user))
+        self.feedback_redactions.extend(cookie['value'] for cookie in self.login.context.cookies())
         self.page = self.login.page = self.login.context.new_page()
         self.page.route('**/*', self.gate)
         self.page.on('response', self.gate.observe_response)
@@ -601,7 +606,7 @@ class BookingBrowser:
             try: self.gate.authorize_manual_captcha()
             except Exception: pass
             atomic_json(ROOT/'.local/captcha/manual-status.json',{
-                'waiting':True,'message':'请在打开的Chrome窗口手动拖动滑块，最多等待5分钟。',
+                'waiting':True,'message':'请在打开的浏览器窗口手动拖动滑块，最多等待5分钟。',
                 'timeout_seconds':self.manual_timeout,'updated_at':now()})
         deadline=time.monotonic()+(self.manual_timeout if self.gate.manual_mode else 25)
         try:
@@ -661,8 +666,9 @@ class BookingBrowser:
             except Exception:
                 body = None
             phase, identifier = classify_confirm(response.status, body)
+            feedback = confirm_feedback(response.status, body, self.feedback_redactions)
             if entry is not None:
-                journal.update(entry, phase, order_id=identifier)
+                journal.update(entry, phase, order_id=identifier, server_feedback=feedback)
             verification=None
             if phase=='verification_required':
                 response,verification=self.verify_and_continue(slot,prepared,journal,entry)
@@ -670,14 +676,17 @@ class BookingBrowser:
                     try: body=response.json()
                     except Exception: body=None
                     phase,identifier=classify_confirm(response.status,body)
-                    if entry is not None: journal.update(entry,phase,order_id=identifier)
+                    feedback=confirm_feedback(response.status,body,self.feedback_redactions)
+                    if entry is not None: journal.update(entry,phase,order_id=identifier,server_feedback=feedback)
                 elif self.gate.attempts>=2:
                     phase='unknown'
-                    if entry is not None: journal.update(entry,phase)
+                    feedback=None
+                    if entry is not None: journal.update(entry,phase,server_feedback=None)
             if phase != 'accepted':
                 return {'phase': phase, 'slot': asdict(slot), 'simulated': self.mode == 'simulate',
                     'real_order_created': False if self.mode == 'simulate' else None, 'network': self.gate.events,
-                    'verification':verification,'manual_required':phase=='verification_required'}
+                    'verification':verification,'manual_required':phase=='verification_required',
+                    'server_feedback':feedback}
             self.page.wait_for_url('**/pc/#/orderDetails/0', timeout=20000)
             self.page.wait_for_function("(" + CHECKOUT + ")()?.order?.venueName != null", timeout=20000)
             payload = self.gate.simulated_order() if self.mode == 'simulate' else self.query_order(identifier)

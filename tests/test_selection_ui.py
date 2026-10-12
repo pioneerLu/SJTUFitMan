@@ -77,6 +77,38 @@ class SelectionUITests(unittest.TestCase):
             self.assertLessEqual(widget.winfo_rooty()+widget.winfo_height(),review.winfo_rooty()+review.winfo_height())
         app.close()
 
+    def test_website_rejection_displays_message_and_code(self):
+        app=BookingApp(self.window)
+        data={'phase':'rejected','slot':prepared()['slot'],'simulated':False,
+              'server_feedback':{'http_status':200,'code':1003,'message':'已达到每日预约上限'}}
+        app.show=MagicMock()
+        app.display_result('submit',data)
+        text=app.show.call_args.args[0]
+        self.assertIn('已达到每日预约上限',text)
+        self.assertIn('错误码 1003',text)
+        app.close()
+
+    def test_single_success_displays_mail_result_separately_from_booking(self):
+        app = BookingApp(self.window)
+        app.show = MagicMock()
+        for phase, expected in [('sent', '邮件服务器已接受'), ('retryable', '后台'),
+                                ('unknown', '可能收到重复'), ('not_configured', '邮件配置未完成')]:
+            with self.subTest(phase=phase):
+                app.display_result('submit', {'phase': 'confirmed', 'slot': prepared()['slot'],
+                    'simulated': False, 'status': '待付款', 'mail_phase': phase})
+                self.assertIn('已确认待付款订单', app.status.get())
+                self.assertIn(expected, app.show.call_args.args[0])
+                self.assertIn('邮件状态', app.show.call_args.args[0])
+        app.close()
+
+    def test_reconcile_displays_recovered_payment_notice(self):
+        app = BookingApp(self.window)
+        app.show = MagicMock()
+        app.display_result('reconcile', {'reconciliation': [{'phase': 'confirmed',
+            'slot': prepared()['slot'], 'status': '待付款', 'mail_phase': 'sent'}]})
+        self.assertIn('邮件服务器已接受', app.show.call_args.args[0])
+        app.close()
+
     def test_dropdown_sync_changes_date_and_invalidates_old_confirmation(self):
         app = BookingApp(self.window)
         app.prepared = {'confirmation_sha256': 'obsolete'}

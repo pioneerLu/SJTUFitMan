@@ -7,6 +7,7 @@ from booking_flow import BookingError
 WEEKDAYS = ('周一', '周二', '周三', '周四', '周五', '周六', '周日')
 # Observed on the school's gym page. A fresh website query replaces these values.
 GYM_TIME_SLOTS = tuple(f'{hour:02d}:00-{hour+1:02d}:00' for hour in range(7, 22))
+DEFAULT_ACTIVITIES = ('健身房', '台球', '舞蹈', '排练厅', '钢琴', '交谊厅')
 
 
 def date_label(value):
@@ -60,6 +61,12 @@ def website_options(snapshot, today):
     if not dates or not periods:
         raise BookingError('网站没有有效的日期或时段选项，请重新同步。')
     selected = snapshot.get('selected_date', {}).get('isdate')
-    return {'activity': snapshot.get('active_type', {}).get('isactiveName'),
+    activity = snapshot.get('active_type', {}).get('isactiveName')
+    activities = list(dict.fromkeys(item['name'] for item in snapshot.get('types', [])
+        if isinstance(item, dict) and isinstance(item.get('name'), str) and 0 < len(item['name']) <= 80
+        and not any(ord(char) < 32 for char in item['name'])))
+    if activity and activity not in activities:
+        activities.append(activity)
+    return {'activity': activity, 'activities': activities,
         'dates': dates, 'date': selected if selected in dates else dates[-1],
         'time_slots': periods, 'read_only': True, 'real_order_created': False}

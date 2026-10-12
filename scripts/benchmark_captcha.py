@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 import time
 
-from playwright.sync_api import sync_playwright
+from playwright_runtime import sync_playwright
 
 from booking_flow import BookingBrowser, ProcessLock
 from login_flow import LoginBrowser, atomic_json, load_config
