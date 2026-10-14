@@ -4,7 +4,7 @@
 
 ## 维护者在本机生成
 
-准备好README中的开发环境后，在项目目录执行：
+按[开发与维护说明](DEVELOPMENT.md)准备好环境后，在项目目录执行：
 
 ```powershell
 pwsh -NoProfile -File .\scripts\build_release.ps1
@@ -12,7 +12,7 @@ pwsh -NoProfile -File .\scripts\build_release.ps1
 
 脚本安装固定版本的打包工具，执行本地测试，生成独立Windows程序，再运行发布版的离线自检。输出位于 `dist/`：
 
-- `SJTUFitMan-v0.2.5-windows-x64.zip`：分发给用户的完整压缩包。
+- `SJTUFitMan-v0.2.6-windows-x64.zip`：分发给用户的完整压缩包。
 - 同名 `.zip.sha256`：用于核对下载是否完整。
 - 同名文件夹：可直接测试；分享时使用原始ZIP。
 

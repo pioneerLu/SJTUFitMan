@@ -62,6 +62,10 @@ class RecordsPage(WorkerPage):
                 result_label = {'confirmed': '预约已核实成功', 'rejected': '网站拒绝', 'unknown': '需核查',
                     'submitting': '提交待核查', 'accepted': '提交待核查', 'verification_required': '等待验证码',
                     'profile_required': '需更新资料', 'auth_required': '需重新登录'}.get(phase, phase)
+                current = entry.get('current_order') or {}
+                if phase == 'confirmed':
+                    result_label = current.get('status') or order.get('status') or (
+                        '待付款' if order.get('state') in ('0', '9') else '已支付' if order.get('state') == '1' else result_label)
                 mail_phase = notice['phase'] if notice else None
                 mail_label = {'sent': '服务器已接受', 'queued': '待发送', 'retryable': '等待重试', 'connecting': '连接中',
                     'sending': '发送中', 'failed': '发送失败', 'unknown': '结果不明'}.get(mail_phase, '待后台补发' if phase == 'confirmed' else '—')
@@ -95,6 +99,11 @@ class RecordsPage(WorkerPage):
             f"{slot.get('date', '')} {slot.get('time', '')}", f"场地：{slot.get('field', '')}"]
         if order.get('order_id'): lines.append('订单号：' + order['order_id'])
         if order.get('status'): lines.append('确认时订单状态：' + order['status'])
+        current = entry.get('current_order') or {}
+        if current.get('status'):
+            lines.append('最近核查状态：' + current['status'])
+            if current.get('released'):
+                lines.append('旧订单已失效，可在“自动预约”重新启动相同时段的候补。')
         if order.get('confirmed_at'):
             try: lines.append('核实时间：' + datetime.fromisoformat(order['confirmed_at']).astimezone(BEIJING).strftime('%Y-%m-%d %H:%M:%S（北京时间）'))
             except (ValueError, TypeError): pass
@@ -102,7 +111,7 @@ class RecordsPage(WorkerPage):
         if detail: lines += ['', detail]
         if entry.get('phase') == 'confirmed':
             lines += ['', '邮件状态：' + payment_notice_status(notice.get('phase') if notice else None)]
-        lines += ['', '请在体育平台个人订单核对当前状态并自行付款。程序不会自动付款或重新创建已核实的订单。']
+        lines += ['', '请在体育平台个人订单核对当前状态并自行付款。有效订单不会重复创建；取消或过期后需重新启动预约。']
         self.show('\n'.join(lines))
 
     def reconcile(self):

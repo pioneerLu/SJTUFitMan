@@ -9,7 +9,7 @@ import time
 from playwright.sync_api import TimeoutError as BrowserTimeout
 from playwright_runtime import sync_playwright
 
-from booking_flow import BookingBrowser, BookingError, Journal, ProcessLock, SlotUnavailable, candidates
+from booking_flow import BookingBrowser, BookingError, Journal, ProcessLock, Slot, SlotUnavailable, candidates, hourly_periods, inspect_order, reservation_released
 from login_flow import FlowError, LoginBrowser, atomic_json, load_config
 from mail_notice import OUTBOX, Outbox, service_outbox, notify_payment
 from poll_settings import BEIJING, SETTINGS_PATH, beijing_now, load_settings, load_waitlist_settings
@@ -136,7 +136,7 @@ class DailyRunner:
         return notify_payment(account, order, self.mail, clock=self.clock)
 
     def complete(self, record, order):
-        # Commit success to disk before SMTP; every restart now skips further booking.
+        # Commit success to disk before SMTP; restarts recheck its reservation state.
         self.store.update(record,phase='confirmed',order=order)
         self.status('confirmed',self.completion_message,order=order)
         try: mail_phase=self.notifier(record['account'],order)
@@ -150,17 +150,53 @@ class DailyRunner:
     def matches_entry(self, record, entry):
         return (entry['slot']['date']==record['target_date'] and entry['slot']['activity']==self.settings.activity)
 
-    def recover(self, browser, journal, record):
+    def relevant_entry(self, record, entry):
+        return self.matches_entry(record, entry)
+
+    def recover(self, browser, journal, record, before_query=None):
         for entry in journal.entries:
             if entry['account']!=browser.account: continue
             if entry['phase'] in ('submitting','unknown','accepted','verification_required'):
                 self.store.update(record,phase='attention',reason='previous_submission_unresolved')
                 self.status('attention','上次下单尚未核实，请先在预约助手中核查个人订单。')
                 return record
-        for entry in journal.entries:
-            if (entry['account']==browser.account and entry['phase']=='confirmed'
-                    and self.matches_entry(record,entry)):
-                return self.complete(record,entry['order'])
+        active = []
+        checked_ids = set()
+        try:
+            # Include overlapping one/two-hour records, not just an exact task key.
+            for entry in journal.entries:
+                if (entry['account'] != browser.account or entry['phase'] != 'confirmed'
+                        or not self.relevant_entry(record, entry)):
+                    continue
+                identifier = (entry.get('order') or {}).get('order_id') or entry.get('order_id')
+                checked_ids.add(identifier)
+                if reservation_released(entry): continue
+                if before_query: before_query()
+                current = journal.refresh_order(browser, entry)
+                if not current['released'] and self.matches_entry(record, entry):
+                    active.append({**entry['order'], **{key: current[key] for key in ('state', 'status', 'amount_due')}})
+            # Older task records may survive without a corresponding journal entry.
+            saved = record.get('order') or {}
+            if saved and saved.get('order_id') not in checked_ids:
+                if before_query: before_query()
+                current = {'order_id': saved.get('order_id'),
+                    **inspect_order(Slot(**saved['slot']), browser.query_order(saved['order_id']))}
+                self.store.update(record, current_order=current)
+                if not current['released']:
+                    active.append({**saved, **{key: current[key] for key in ('state', 'status', 'amount_due')}})
+        except Exception:
+            self.store.update(record, phase='attention', reason='previous_order_check_failed')
+            self.status('attention', '旧订单当前状态无法确认，已停止下单。请在“记录”核查订单或重新登录后再启动。')
+            return record
+        if active: return self.complete(record, active[-1])
+        if record['phase'] == 'confirmed' and not record.get('order'):
+            self.store.update(record, phase='attention', reason='previous_order_check_failed')
+            self.status('attention', '旧任务缺少订单记录，请在体育平台核查后处理。')
+            return record
+        if record['phase'] == 'confirmed' or record.get('reason') == 'previous_order_check_failed':
+            self.store.update(record, phase='polling', previous_order=record.get('order'),
+                order=None, mail_phase=None, reason=None)
+            self.status('polling', '旧订单已取消或过期，本次重新启动预约将继续查询。')
         return None
 
     def run_day(self, browser, journal, day):
@@ -177,15 +213,17 @@ class DailyRunner:
             end_phase='exhausted')
 
     def run_target(self, browser, journal, target, start, end, record, max_checks=None, end_phase='expired'):
-        if record['phase']=='confirmed':
-            return self.complete(record,record['order'])
-        if record['phase'] in ('attention','exhausted','rejected'):
-            return record
-        recovered=self.recover(browser,journal,record)
-        if recovered: return recovered
         if self.stop.is_set() or self.clock()>=end:
             self.store.update(record,phase='paused' if self.stop.is_set() else
                 ('exhausted' if max_checks is not None else end_phase))
+            return record
+        def before_query():
+            self.validate_config()
+            if self.stop.is_set() or self.clock() >= end or browser.gate.rate_limited or browser.gate.auth_failed:
+                raise BookingError('任务已停止或到期，禁止继续查询订单。')
+        recovered=self.recover(browser,journal,record,before_query)
+        if recovered: return recovered
+        if record['phase'] in ('attention','exhausted','rejected'):
             return record
         try: browser.check_no_pending()
         except Exception:
@@ -291,16 +329,19 @@ class WaitlistRunner(DailyRunner):
         return (super().matches_entry(record,entry) and slot['time']==record['time']
             and (not record['field'] or record['field'] in (slot['field'],slot['field_id'])))
 
+    def relevant_entry(self, record, entry):
+        slot = entry['slot']
+        return (DailyRunner.matches_entry(self, record, entry)
+            and bool(set(hourly_periods(slot['time'])) & set(hourly_periods(record['time'])))
+            and (not record['field'] or record['field'] in (slot['field'], slot['field_id'])))
+
     def run_task(self, browser, journal):
         record=self.store.task(browser.account,self.settings)
-        if record['phase']=='confirmed': return self.complete(record,record['order'])
-        recovered=self.recover(browser,journal,record)
-        if recovered: return recovered
         if record['phase'] in ('attention','rejected'):
             # A user-initiated restart may retry read failures after fixing login/network.
             # Ambiguous or rejected submissions require explicit order reconciliation.
             if record.get('reason') not in ('flow_stopped','read_timeouts','server_throttled_or_auth_required',
-                    'pending_order_or_query_failed'):
+                    'pending_order_or_query_failed','previous_order_check_failed'):
                 self.status('attention','此前候补未能完成，请先核查登录与个人订单。',reason=record.get('reason',''))
                 return record
             self.store.update(record,phase='polling')
@@ -367,8 +408,9 @@ def run_waitlist(settings_path=SETTINGS_PATH, stop_event=None):
                         and slot['time']==settings.period and (not settings.field or settings.field in (slot['field'],slot['field_id']))
                         and order.get('state') in ('0','9','1') and order.get('simulated') is False
                         and order.get('real_order_created') is True):
-                    record=store.task(entry['account'],settings)
-                    store.update(record,phase='confirmed',order=order)
+                    if not reservation_released(entry):
+                        record=store.task(entry['account'],settings)
+                        store.update(record,phase='confirmed',order=order)
                     box.enqueue(entry['account'],order,mail)
         # This also supports reminders after expiry; it does not query or create orders.
         try: service_outbox(mail)
@@ -429,8 +471,9 @@ def recover_payment_mail(settings, mail, store, journal, clock=beijing_now, outb
             if (entry['phase']=='confirmed' and entry['slot']['activity']==settings.activity
                     and entry['slot']['date']==target and order.get('state') in ('0','9','1')
                     and order.get('simulated') is False and order.get('real_order_created') is True):
-                record=store.day(entry['account'],target)
-                store.update(record,phase='confirmed',order=order)
+                if not reservation_released(entry):
+                    record=store.day(entry['account'],target)
+                    store.update(record,phase='confirmed',order=order)
                 outbox.enqueue(entry['account'],order,mail)
 
 

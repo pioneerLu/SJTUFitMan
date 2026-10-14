@@ -33,6 +33,8 @@ READ_POSTS = {
 READ_GETS = {QUERY, HISTORY, '/system/user/currentUser', '/venue/notice/newStadiumNotice'}
 ORDER_ID = re.compile(r'[A-Za-z0-9_-]{1,128}\Z')
 SIM_ID = 'SJTUFitMan-SIMULATED-NOT-A-REAL-ORDER'
+# Explicit terminal states from the platform's orderStatusName mapping.
+RELEASED_ORDER_STATES = {'2': '已取消', '8': '支付超时取消', '23': '系统取消', '99': '已过期'}
 
 
 class BookingError(FlowError):
@@ -187,7 +189,7 @@ def classify_confirm(status, body):
     return 'unknown', None
 
 
-def validate_order(slot, payload):
+def inspect_order(slot, payload):
     if not isinstance(payload, dict) or type(payload.get('code')) is not int or payload['code'] != 0 or not isinstance(payload.get('data'), dict):
         raise BookingError('订单详情未能确认，禁止再次提交。')
     order = payload['data']
@@ -208,10 +210,27 @@ def validate_order(slot, payload):
     if order.get('venueName') != slot.venue_name or money(order.get('countPrice')) != money(slot.price):
         raise BookingError('服务器订单与预约目标不匹配，禁止再次提交。')
     state = str(order.get('orderStateId'))
-    if state not in ('0', '9', '1'):
-        raise BookingError('订单未处于可确认的待付款或已支付状态。')
-    return {'state': state, 'status': '待付款' if state in ('0', '9') else '已支付',
+    if state not in ('0', '9', '1') and state not in RELEASED_ORDER_STATES:
+        raise BookingError('订单状态尚不能确认有效或已失效，请在体育平台核查。')
+    return {'state': state, 'status': RELEASED_ORDER_STATES.get(state,
+                '待付款' if state in ('0', '9') else '已支付'),
+            'released': state in RELEASED_ORDER_STATES,
             'amount_due': f"{money(order.get('price')):.2f}"}
+
+
+def validate_order(slot, payload):
+    verified = inspect_order(slot, payload)
+    if verified.pop('released'):
+        raise BookingError('订单未处于可确认的待付款或已支付状态。')
+    return verified
+
+
+def reservation_released(entry):
+    """Only an exact old order's verified terminal state releases duplicate protection."""
+    current = entry.get('current_order') or {}
+    identifier = (entry.get('order') or {}).get('order_id') or entry.get('order_id')
+    return (bool(identifier) and current.get('order_id') == identifier
+        and current.get('released') is True and current.get('state') in RELEASED_ORDER_STATES)
 
 
 class ProcessLock(AbstractContextManager):
@@ -267,11 +286,30 @@ class Journal:
                 continue
             if entry['phase'] in ('submitting', 'unknown', 'verification_required', 'accepted'):
                 raise BookingError('上次提交结果尚未核实，请先检查个人订单；禁止再次下单。')
-            if entry['phase'] == 'confirmed':
+            if entry['phase'] == 'confirmed' and not reservation_released(entry):
                 previous = Slot(**entry['slot'])
                 same_field = (previous.venue_id, previous.activity, previous.date, previous.field_id) == (slot.venue_id, slot.activity, slot.date, slot.field_id)
                 if same_field and set(hourly_periods(previous.time)) & set(hourly_periods(slot.time)):
                     raise BookingError('该目标或其中一个小时已有已确认订单，禁止重复下单。')
+
+    def refresh_order(self, browser, entry):
+        if entry['account'] != browser.account or entry['phase'] != 'confirmed':
+            raise BookingError('不能核查其他账号或尚未确认的订单。')
+        order = entry.get('order') or {}
+        if order.get('simulated') is not False or order.get('real_order_created') is not True:
+            raise BookingError('旧记录尚不能确认为真实订单，请在体育平台核查。')
+        if not order.get('slot') or Slot(**order['slot']).key() != Slot(**entry['slot']).key():
+            raise BookingError('旧订单目标记录不一致，请在体育平台核查。')
+        identifier = order.get('order_id') or entry.get('order_id')
+        if not isinstance(identifier, str) or not ORDER_ID.fullmatch(identifier):
+            raise BookingError('旧订单缺少有效订单号，请在体育平台核查。')
+        if entry.get('order_id') and entry['order_id'] != identifier:
+            raise BookingError('旧订单号不一致，请在体育平台核查。')
+        current = {'order_id': identifier, **inspect_order(Slot(**entry['slot']), browser.query_order(identifier)),
+            'checked_at': now()}
+        # Preserve the original success event for durable mail recovery.
+        self.update(entry, 'confirmed', current_order=current)
+        return current
 
     def begin(self, account, slot, baseline_ids):
         self.assert_can_submit(account, slot)

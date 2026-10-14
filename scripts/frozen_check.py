@@ -10,6 +10,35 @@ import tomllib
 from runtime import ROOT, FROZEN, asset_path
 
 
+def order_lifecycle_fixture():
+    """Exercise terminal-state handling in the shipped worker, without network I/O."""
+    from dataclasses import asdict
+    import tempfile
+    from types import SimpleNamespace
+    from booking_flow import BookingError, Journal, NetworkGate, Slot, reservation_released
+    slot = Slot('fixture-venue', '学生中心', '健身房', '2099-01-01', 'fixture-field', '健身房',
+        '18:00-20:00', '4.00', 0, 0, ('2.00', '2.00'))
+    gate = NetworkGate('simulate'); gate.slot = slot
+    response = gate.simulated_order()
+    response['data']['orderStateId'] = '8'
+    with tempfile.TemporaryDirectory(prefix='sjtufitman-order-') as folder:
+        journal = Journal(Path(folder) / 'journal.json')
+        entry = journal.begin('fixture-account', slot, [])
+        journal.update(entry, 'confirmed', order={'phase': 'confirmed', 'order_id': 'FIXTURE-OLD',
+            'slot': asdict(slot), 'state': '0', 'simulated': False, 'real_order_created': True})
+        browser = SimpleNamespace(account='fixture-account', query_order=lambda identifier: response)
+        journal.refresh_order(browser, entry)
+        assert reservation_released(entry) and entry['order']['state'] == '0'
+        journal = Journal(journal.path)
+        journal.assert_can_submit(browser.account, slot)
+        response['data']['orderStateId'] = '1'
+        journal.refresh_order(browser, journal.entries[0])
+        try: journal.assert_can_submit(browser.account, slot)
+        except BookingError: pass
+        else: raise AssertionError('Paid reservation lost duplicate protection')
+    return True
+
+
 def delayed_login_fixture(browser, template):
     """Only locally fulfilled pages: delayed redirect and a >5s form render."""
     from login_flow import LoginBrowser, LOGIN_HOST, HOST
@@ -95,7 +124,8 @@ def components(browser_preference=None):
     PollSettings.read({**template,'booking':{'time_slots':['18:00-20:00']}})
     return {'version':VERSION,'frozen':FROZEN,'offline_check':True,'browser_check':browser_report,
                      'playwright_driver':True,'driver_shutdown':True,'ocr_inference':True,'opencv':True,
-                     'assets':True,'real_order_created':False,'email_sent':False}
+                     'assets':True,'order_lifecycle':order_lifecycle_fixture(),
+                     'real_order_created':False,'email_sent':False}
 
 
 def run(argv=None):

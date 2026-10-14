@@ -104,26 +104,25 @@ def reconcile(browser, journal):
             results.append({'phase': 'unknown', 'matches': len(matches),
                 'message': '未能唯一确认订单，继续禁止再次提交。请手动检查个人订单。'})
     if not results:
-        # Also allow a missed single-booking reminder to be recovered safely. Verify
-        # the latest confirmed order on the server before using its payment state.
-        latest = next((entry for entry in reversed(journal.entries)
+        # Recheck future confirmed reservations, including cancelled unpaid orders.
+        confirmed = [entry for entry in reversed(journal.entries)
             if entry['account'] == browser.account and entry['phase'] == 'confirmed'
-            and entry.get('order', {}).get('order_id')), None)
-        if latest is not None:
-            slot = Slot(**latest['slot'])
+            and entry.get('order', {}).get('order_id')]
+        relevant = [entry for entry in confirmed if entry['slot']['date'] >= beijing_now().date().isoformat()]
+        for latest in relevant or confirmed[:1]:
             identifier = latest['order']['order_id']
-            from booking_flow import validate_order
             try:
-                verified = validate_order(slot, browser.query_order(identifier))
+                current = journal.refresh_order(browser, latest)
             except BookingError:
                 results.append({'phase': 'attention',
                     'message': '上次订单当前无法确认为待付款或已支付，未发送提醒。请在体育平台个人订单查看是否已过期或取消。'})
             else:
-                order = {'phase': 'confirmed', 'slot': asdict(slot), 'order_id': identifier,
-                    **verified, 'simulated': False, 'real_order_created': True,
-                    'confirmed_at': beijing_now().isoformat()}
-                journal.update(latest, 'confirmed', order=order)
-                results.append(order)
+                if current['released']:
+                    results.append({'phase': 'released', 'order_id': identifier, **current,
+                        'message': '旧订单' + current['status'] + '，该订单的重复预约限制已解除，可重新启动自动预约。'})
+                else:
+                    results.append({**latest['order'],
+                        **{key: current[key] for key in ('state', 'status', 'amount_due')}})
     return {'reconciliation': results, 'read_only': True}
 
 

@@ -60,7 +60,15 @@ class Browser:
         self.gate=SimpleNamespace(rate_limited=False,auth_failed=False)
         self.page=SimpleNamespace(wait_for_timeout=lambda milliseconds:clock.advance(milliseconds/1000))
         self.outcome='confirmed';self.on_stage=None;self.before_commit=None
+        self.order_state='0';self.order_queries=[];self.existing_orders={}
     def check_no_pending(self): return []
+    def query_order(self, identifier):
+        self.order_queries.append(identifier)
+        slot=self.existing_orders.get(identifier,target_slot())
+        gate=booking.NetworkGate('simulate');gate.slot=slot
+        payload=gate.simulated_order()
+        payload['data']['orderStateId']=self.order_state
+        return payload
     def refresh_grid(self,activity,day):
         if activity!='健身房' or day!='2026-10-18': raise AssertionError('wrong target')
         self.read_times.append(self.clock())
@@ -77,6 +85,7 @@ class Browser:
         self.commits+=1
         entry=journal.begin(self.account,slot,[])
         result=order(slot)
+        self.existing_orders[result['order_id']]=slot
         if self.outcome=='confirmed': journal.update(entry,'confirmed',order=result)
         else:
             result={'phase':self.outcome};journal.update(entry,self.outcome)
@@ -223,7 +232,7 @@ class RunnerTests(unittest.TestCase):
         self.journal.begin(Browser.account,target_slot(day='2026-10-17'),[])
         browser=Browser(self.clock,[snapshot()]);self.assertEqual(self.run_day(browser)['phase'],'attention')
         self.assertEqual(browser.read_times,[])
-    def test_journal_recovery_after_crash_does_not_touch_website(self):
+    def test_journal_recovery_rechecks_order_without_polling_or_resubmitting(self):
         entry=self.journal.begin(Browser.account,target_slot(),[])
         self.journal.update(entry,'confirmed',order=order())
         browser=Browser(self.clock,[snapshot()]);self.assertEqual(self.run_day(browser)['phase'],'confirmed')

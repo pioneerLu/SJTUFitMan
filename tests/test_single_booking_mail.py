@@ -129,10 +129,11 @@ class SingleBookingMailTests(unittest.TestCase):
                 browser.commit.assert_not_called()
 
     def test_reconcile_expired_order_does_not_create_payment_notice(self):
-        browser, journal = self.reconcile_fixture('3')
+        browser, journal = self.reconcile_fixture('8')
         result = cli.reconcile(browser, journal)['reconciliation'][0]
-        self.assertEqual(result['phase'], 'attention')
-        self.assertIn('过期', result['message'])
+        self.assertEqual(result['phase'], 'released')
+        self.assertIn('支付超时取消', result['message'])
+        self.assertTrue(journal.entries[0]['current_order']['released'])
         browser.commit.assert_not_called()
 
     def test_reconcile_command_sends_for_verified_old_order_without_resubmitting(self):
